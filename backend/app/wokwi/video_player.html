@@ -328,7 +328,8 @@
 
         function startStream() {
             // Use the MJPEG stream endpoint with plate detection enabled
-            const streamUrl = '/video/stream?detect_plates=true&skip=2';
+            // Sprint G: Using Sri Lankan traffic video with two-stage "Zoom" detection
+            const streamUrl = '/video/stream?detect_plates=true&skip=2&source=D:/Intelligent-Traffic-Management-System/data/videos/SriLankan_Traffic_Video.mp4';
             
             streamImg.src = streamUrl;
             streamImg.style.display = 'block';

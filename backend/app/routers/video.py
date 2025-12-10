@@ -1,6 +1,10 @@
 """
 Intelligent Traffic Management System - Video Streaming Router
-MJPEG streaming with real-time YOLOv8 detection overlay
+MJPEG streaming with real-time YOLOv8 two-stage detection overlay
+
+Sprint G (Revision): Uses "Zoom" detection pipeline:
+- Stage 1: Vehicle tracking (wide view)
+- Stage 2: Plate detection via cropping each vehicle (zoom view)
 """
 
 import asyncio
@@ -15,11 +19,12 @@ from fastapi.responses import StreamingResponse
 
 from app.config import get_settings
 from app.detection.yolo_detector import (
-    load_model,
+    load_vehicle_model,
     load_plate_model,
     detect_and_track,
-    detect_plates,
     draw_detections,
+    draw_frame_info,
+    FrameResult,
     VEHICLE_CLASSES,
 )
 from app.routers.parking import get_detector  # import parking detector to overlay zones
@@ -71,7 +76,11 @@ async def generate_mjpeg_frames(
     detect_plates_flag: bool = False,
 ):
     """
-    Generator that yields MJPEG frames with detection overlay.
+    Generator that yields MJPEG frames with two-stage detection overlay.
+    
+    Sprint G (Revision): Uses "Zoom" detection pipeline:
+    - Stage 1: Vehicle tracking (every frame)
+    - Stage 2: Plate detection via cropping (every 3rd frame, optimized)
     
     Args:
         video_path: Path to video file
@@ -90,14 +99,14 @@ async def generate_mjpeg_frames(
     if not cap.isOpened():
         raise HTTPException(status_code=404, detail=f"Cannot open video: {video_path}")
     
-    # Load vehicle model (cached)
-    model = load_model(settings.vehicle_model)
+    # Load models using new two-stage API
+    vehicle_model = load_vehicle_model("cpu")
     _pipeline_state["model"] = settings.vehicle_model
     
     # Load plate model if requested
     plate_model = None
     if detect_plates_flag:
-        plate_model = load_plate_model("cpu")  # Use CPU for plate detection
+        plate_model = load_plate_model("cpu")
         _pipeline_state["plate_model"] = settings.plate_model
     
     video_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
@@ -123,24 +132,21 @@ async def generate_mjpeg_frames(
             # Process only every Nth frame for performance
             if frame_idx % frame_skip == 0:
                 if show_detections:
+                    # Use new two-stage detect_and_track API
+                    # This handles both vehicle tracking AND plate detection internally
                     result = detect_and_track(
-                        model, 
-                        frame, 
+                        vehicle_model=vehicle_model,
+                        frame=frame,
                         frame_id=frame_idx,
                         confidence=confidence,
-                        classes=list(VEHICLE_CLASSES.keys()),
+                        plate_model=plate_model,
+                        run_plate_detection=detect_plates_flag,
                     )
                     
                     _pipeline_state["frames_processed"] += 1
                     _pipeline_state["total_detections"] += len(result.detections)
+                    _pipeline_state["plates_detected"] += len(result.plate_boxes)
                     _pipeline_state["last_frame_time"] = time.time()
-                    
-                    # Run plate detection if enabled
-                    plate_boxes = []
-                    vehicle_plate_map = {}
-                    if detect_plates_flag and plate_model is not None and len(result.detections) > 0:
-                        plate_boxes, vehicle_plate_map = detect_plates(plate_model, frame, result.detections, confidence=0.3)
-                        _pipeline_state["plates_detected"] += len(plate_boxes)
                     
                     # Draw parking zones overlay (if available)
                     try:
@@ -150,20 +156,11 @@ async def generate_mjpeg_frames(
                     except Exception:
                         pass
 
-                    # Draw detections on frame (includes plate boxes if detected)
-                    frame = draw_detections(frame, result.detections, plate_boxes, vehicle_plate_map)
+                    # Draw detections using new visualization API
+                    frame = draw_detections(frame, result)
                     
-                    # Add stats overlay
-                    plates_info = f" | Plates: {len(plate_boxes)}" if detect_plates_flag else ""
-                    cv2.putText(
-                        frame,
-                        f"Frame: {frame_idx}/{total_frames} | Vehicles: {len(result.detections)}{plates_info} | {result.inference_time_ms:.0f}ms",
-                        (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
-                        (0, 255, 0),
-                        2,
-                    )
+                    # Add frame info overlay
+                    frame = draw_frame_info(frame, result)
                 
                 # Resize for streaming (reduce bandwidth)
                 scale = 0.75
