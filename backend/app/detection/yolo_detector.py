@@ -17,7 +17,6 @@ from datetime import datetime
 
 import cv2
 import numpy as np
-import os
 
 # Add parent to path for imports when running as script
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
@@ -33,8 +32,8 @@ settings = get_settings()
 # Model cache to avoid reloading
 _model_cache: Dict[str, Any] = {}
 
-# Plate history: track_id -> {"bbox": (x1,y1,x2,y2), "timestamp": float, "frame_count": int}
-# This remembers which vehicles have plates even when we skip detection frames
+# Plate history: track_id -> {"bbox": (x1,y1,x2,y2), "text": str, "timestamp": float, "frame_count": int}
+# This remembers which vehicles have plates and their text even when we skip detection frames
 plate_history: Dict[int, Dict[str, Any]] = {}
 
 # Frame counter for optimization (only run plate detection every N frames)
@@ -62,6 +61,7 @@ class Detection:
     timestamp: float = field(default_factory=time.time)
     has_plate: bool = False  # True if a plate was detected for this vehicle
     plate_bbox: Optional[Tuple[int, int, int, int]] = None  # Plate bounding box (real coords)
+    plate_text: Optional[str] = None  # OCR-read plate text
     
     def to_dict(self) -> dict:
         return {
@@ -75,6 +75,7 @@ class Detection:
             "timestamp": self.timestamp,
             "has_plate": self.has_plate,
             "plate_bbox": self.plate_bbox,
+            "plate_text": self.plate_text,
         }
 
 
@@ -275,20 +276,38 @@ def track_vehicles(
 
 
 # ============================================================================
-# STAGE 2: PLATE DETECTION (ZOOM VIEW)
+# STAGE 2: PLATE DETECTION (ZOOM VIEW) WITH OCR
 # ============================================================================
+
+# Lazy import OCR service to avoid circular imports
+_ocr_service = None
+
+def get_ocr_service():
+    """Lazy load OCR service."""
+    global _ocr_service
+    if _ocr_service is None:
+        try:
+            from app.services.ocr_service import read_plate
+            _ocr_service = read_plate
+        except ImportError:
+            print("⚠️ OCR service not available")
+            _ocr_service = lambda x: None
+    return _ocr_service
+
 
 def detect_plates_in_crops(
     plate_model: Any,
     frame: np.ndarray,
     vehicle_detections: List[Detection],
     confidence: float = 0.2,  # Low confidence to catch more plates
-) -> Tuple[List[Tuple[int, int, int, int]], Dict[int, Tuple[int, int, int, int]]]:
+) -> Tuple[List[Tuple[int, int, int, int]], Dict[int, Dict[str, Any]]]:
     """
     Stage 2: Detect plates by cropping each vehicle and running plate detection.
     
-    This "zoom" approach gives the plate model a closer view of each vehicle,
-    significantly improving detection accuracy for smaller plates.
+    Sprint H Features:
+    - Geometric filter: Ignore plates in top 30% of vehicle (unlikely location)
+    - OCR integration: Read plate text and filter false positives
+    - Text memory: Remember plate text for tracked vehicles
     
     Args:
         plate_model: Loaded plate detection model
@@ -299,7 +318,7 @@ def detect_plates_in_crops(
     Returns:
         Tuple of (all_plate_boxes, vehicle_plate_map)
         - all_plate_boxes: List of plate bboxes in REAL frame coordinates
-        - vehicle_plate_map: Dict mapping track_id to plate bbox
+        - vehicle_plate_map: Dict mapping track_id to {"bbox": tuple, "text": str or None}
     """
     global plate_history
     
@@ -308,6 +327,9 @@ def detect_plates_in_crops(
     
     all_plates = []
     vehicle_plate_map = {}
+    
+    # Get OCR function
+    read_plate = get_ocr_service()
     
     for det in vehicle_detections:
         vx1, vy1, vx2, vy2 = det.bbox
@@ -327,9 +349,6 @@ def detect_plates_in_crops(
         
         # Crop the vehicle from the frame
         vehicle_crop = frame[vy1:vy2, vx1:vx2]
-        # DEBUG: Save the crop to see if it's correct
-        os.makedirs("debug_crops", exist_ok=True)
-        cv2.imwrite(f"debug_crops/crop_{det.track_id}.jpg", vehicle_crop)
         
         # Run plate detection on the cropped vehicle image
         results = plate_model.predict(
@@ -346,6 +365,15 @@ def detect_plates_in_crops(
                 xyxy = boxes.xyxy[i].cpu().numpy()
                 px1, py1, px2, py2 = map(int, xyxy)
                 
+                # ========== GEOMETRIC FILTER ==========
+                # Calculate center Y of plate box (in crop coordinates)
+                plate_center_y = (py1 + py2) // 2
+                
+                # Ignore if plate is in top 30% of vehicle (unlikely location)
+                # Plates are typically in the middle-to-bottom of the vehicle
+                if plate_center_y < (crop_h * 0.3):
+                    continue  # Skip this detection
+                
                 # COORDINATE MAPPING: Convert crop coords to real frame coords
                 # Plate_Real = Vehicle_Origin + Plate_Crop
                 real_px1 = vx1 + px1
@@ -354,35 +382,51 @@ def detect_plates_in_crops(
                 real_py2 = vy1 + py2
                 
                 plate_bbox = (real_px1, real_py1, real_px2, real_py2)
+                
+                # ========== OCR: READ PLATE TEXT ==========
+                # Crop the plate region for OCR
+                plate_crop = vehicle_crop[py1:py2, px1:px2]
+                plate_text = None
+                
+                if plate_crop.size > 0:
+                    plate_text = read_plate(plate_crop)
+                
+                # If OCR returns None, it's likely a false positive (grill, sticker, etc.)
+                # But we still show the box - just without text
+                
                 all_plates.append(plate_bbox)
                 
-                # Associate plate with this vehicle
-                vehicle_plate_map[det.track_id] = plate_bbox
+                # Associate plate with this vehicle (now includes text)
+                vehicle_plate_map[det.track_id] = {
+                    "bbox": plate_bbox,
+                    "text": plate_text,
+                }
                 
                 # Update plate history for this vehicle
                 plate_history[det.track_id] = {
                     "bbox": plate_bbox,
+                    "text": plate_text,
                     "timestamp": time.time(),
                     "frame_count": 0,  # Reset frame count
                 }
                 
-                # Only take the first plate per vehicle
+                # Only take the first valid plate per vehicle
                 break
     
     return all_plates, vehicle_plate_map
 
 
-def update_plate_history(vehicle_detections: List[Detection]) -> Dict[int, Tuple[int, int, int, int]]:
+def update_plate_history(vehicle_detections: List[Detection]) -> Dict[int, Dict[str, Any]]:
     """
     Update plate history and return plates from memory for vehicles we're still tracking.
     
-    This allows us to show "Plate Detected" even on frames where we skip plate detection.
+    This allows us to show "Plate Detected" and plate text even on frames where we skip detection.
     
     Args:
         vehicle_detections: Current frame's vehicle detections
     
     Returns:
-        Dict mapping track_id to plate bbox from history
+        Dict mapping track_id to {"bbox": tuple, "text": str or None} from history
     """
     global plate_history
     
@@ -396,7 +440,10 @@ def update_plate_history(vehicle_detections: List[Detection]) -> Dict[int, Tuple
         
         # If vehicle is still visible and history is fresh, use remembered plate
         if track_id in current_track_ids and info["frame_count"] < PLATE_HISTORY_MAX_AGE:
-            remembered_plates[track_id] = info["bbox"]
+            remembered_plates[track_id] = {
+                "bbox": info["bbox"],
+                "text": info.get("text"),
+            }
         
         # Mark old entries for removal
         if info["frame_count"] >= PLATE_HISTORY_MAX_AGE:
@@ -461,16 +508,18 @@ def detect_and_track(
         remembered_plates = update_plate_history(detections)
         
         # Merge: Current detections take priority, then history
-        for track_id, bbox in remembered_plates.items():
+        for track_id, plate_info in remembered_plates.items():
             if track_id not in vehicle_plate_map:
-                vehicle_plate_map[track_id] = bbox
-                all_plates.append(bbox)
+                vehicle_plate_map[track_id] = plate_info
+                all_plates.append(plate_info["bbox"])
     
-    # Update detections with plate info
+    # Update detections with plate info (now handles dict structure with text)
     for det in detections:
         if det.track_id in vehicle_plate_map:
+            plate_info = vehicle_plate_map[det.track_id]
             det.has_plate = True
-            det.plate_bbox = vehicle_plate_map[det.track_id]
+            det.plate_bbox = plate_info["bbox"]
+            det.plate_text = plate_info.get("text")
     
     _frame_counter += 1
     inference_time = (time.time() - start_time) * 1000  # ms
@@ -539,7 +588,7 @@ def draw_detections(
         # Draw vehicle box
         cv2.rectangle(annotated, (x1, y1), (x2, y2), color, box_thickness)
         
-        # Build label text: "ID: X | class_name [Plate!]"
+        # Build label text: "ID:X | class_name" or "ID:X | PLATE_TEXT" if OCR succeeded
         if show_labels or show_track_id:
             label_parts = []
             
@@ -550,15 +599,18 @@ def draw_detections(
                 label_parts.append(det.class_name)
                 label_parts.append(f"{det.confidence:.2f}")
             
-            # Add plate indicator
-            if det.has_plate:
-                label_parts.append("[Plate!]")
-            
+            # Build the label
             label = " | ".join(label_parts[:2])  # "ID:X | car"
             if len(label_parts) > 2:
                 label += f" {label_parts[2]}"    # confidence
+            
+            # Add plate text if available, otherwise just [Plate!]
             if det.has_plate:
-                label += " [Plate!]"
+                if det.plate_text:
+                    # Show the OCR text instead of generic [Plate!]
+                    label += f" | {det.plate_text}"
+                else:
+                    label += " [Plate!]"
             
             # Draw label background
             font = cv2.FONT_HERSHEY_SIMPLEX
