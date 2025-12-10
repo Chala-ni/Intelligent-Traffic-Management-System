@@ -1,6 +1,6 @@
 """
 Intelligent Traffic Management System - YOLOv8 Advanced Detection Module
-Sprint H+ (Final): Performance Optimized Detection with Full Feature Set
+FINAL VERSION: Full Integration with TTS, Scoring, Traffic Control
 
 Features:
 =========
@@ -8,9 +8,11 @@ Features:
 2. OCR Caching: Only run OCR every 2+ seconds per vehicle
 3. Frame Skipping: Run YOLO every 2nd frame, reuse boxes on skipped frames
 4. Speed Estimation: Calculate vehicle speed from centroid movement
-5. Parking Violation: Warning phase (5s) → Penalty phase (15s) with TTS
-6. Signal Automation: Update traffic light every 30 frames based on vehicle count
-7. Optimized for Sri Lankan traffic (cars, motorcycles, tuk-tuks, buses, trucks)
+5. Parking Zones: Configurable red zones with warning/violation phases
+6. TTS Warnings: Voice alerts for parking violations
+7. Database Integration: Save violations to SQLite via ScoringEngine
+8. Signal Automation: Fuzzy logic traffic light control
+9. Visual Effects: Flashing purple boxes for penalized vehicles
 """
 
 import sys
@@ -35,36 +37,63 @@ settings = get_settings()
 # CONFIGURATION CONSTANTS
 # ============================================================================
 
-# Frame skipping - only run YOLO every N frames (1 = every frame, 2 = every 2nd, etc.)
+# Frame skipping - only run YOLO every N frames
 YOLO_DETECTION_INTERVAL: int = 2
 
-# Plate detection interval (only run plate detection every N frames)
+# Plate detection interval
 PLATE_DETECTION_INTERVAL: int = 3
 
-# OCR cooldown per vehicle (seconds) - don't re-read same plate too often
+# OCR cooldown per vehicle (seconds)
 OCR_COOLDOWN_SECONDS: float = 2.0
 
-# Speed estimation
-SPEED_SCALE_FACTOR: float = 0.5  # pixels to km/h conversion (adjust for camera)
-SPEEDING_THRESHOLD: float = 80.0  # km/h - above this = speeding
+# Speed estimation (pixels/sec to km/h)
+SPEED_SCALE_FACTOR: float = 0.5
+SPEEDING_THRESHOLD_KMH: float = 80.0
+SPEEDING_THRESHOLD_PIXELS: float = 150.0  # pixels/second for demo
 
 # Parking violation timing
-PARKING_WARNING_SECONDS: float = 5.0   # Warning phase starts
-PARKING_VIOLATION_SECONDS: float = 15.0  # Violation/penalty phase
+PARKING_WARNING_SECONDS: float = 5.0
+PARKING_VIOLATION_SECONDS: float = 15.0
 
-# Signal automation - update signal every N frames
-SIGNAL_UPDATE_INTERVAL: int = 30  # ~1 second at 30fps
+# Signal automation interval
+SIGNAL_UPDATE_INTERVAL: int = 30  # frames (~1 second at 30fps)
 
 # History cleanup
-PLATE_HISTORY_MAX_AGE: int = 30  # frames
-TRACKING_HISTORY_MAX_AGE: int = 60  # frames
+PLATE_HISTORY_MAX_AGE: int = 30
+TRACKING_HISTORY_MAX_AGE: int = 60
+
+# TTS cooldown (don't spam warnings)
+TTS_COOLDOWN_SECONDS: float = 10.0
+
+
+# ============================================================================
+# PARKING ZONES CONFIGURATION
+# ============================================================================
+
+# Define parking zones as polygons (x, y) in frame coordinates
+# These are "no parking" zones - red boxes will be drawn
+# Adjust these coordinates based on your video feed
+DEFAULT_PARKING_ZONES = [
+    {
+        "id": "zone_1",
+        "name": "No Parking Zone 1",
+        "polygon": [(50, 400), (300, 400), (300, 550), (50, 550)],
+        "color": (0, 0, 255),  # Red
+    },
+    {
+        "id": "zone_2", 
+        "name": "No Parking Zone 2",
+        "polygon": [(500, 400), (750, 400), (750, 550), (500, 550)],
+        "color": (0, 0, 255),  # Red
+    },
+]
 
 
 # ============================================================================
 # GLOBAL STATE & CACHING
 # ============================================================================
 
-# Model cache to avoid reloading
+# Model cache
 _model_cache: Dict[str, Any] = {}
 
 # Plate history: track_id -> {"bbox", "text", "timestamp", "frame_count"}
@@ -73,18 +102,24 @@ plate_history: Dict[int, Dict[str, Any]] = {}
 # OCR cooldown: track_id -> last_ocr_time
 ocr_cooldown: Dict[int, float] = {}
 
-# Speed tracking: track_id -> {"prev_centroid", "prev_time", "speed", "is_speeding"}
+# Speed tracking: track_id -> {"prev_centroid", "prev_time", "speed", "is_speeding", "speed_pixels"}
 speed_history: Dict[int, Dict[str, Any]] = {}
 
-# Parking tracking: track_id -> {"entry_time", "zone_id", "warned", "penalized", "plate"}
+# Parking tracking: track_id -> {"entry_time", "zone_id", "warned", "penalized", "plate", "tts_time"}
 parking_tracker: Dict[int, Dict[str, Any]] = {}
+
+# Penalized vehicles (for flashing effect)
+penalized_vehicles: Dict[int, float] = {}  # track_id -> penalize_time
 
 # Previous frame detections (for frame skipping)
 _prev_detections: List[Any] = []
 _prev_plate_boxes: List[Tuple[int, int, int, int]] = []
 
-# Frame counter for optimization
+# Frame counter
 _frame_counter: int = 0
+
+# Parking zones (can be updated at runtime)
+parking_zones: List[Dict] = DEFAULT_PARKING_ZONES.copy()
 
 
 # ============================================================================
@@ -93,12 +128,12 @@ _frame_counter: int = 0
 
 @dataclass
 class Detection:
-    """Container for a single detection result with extended fields."""
+    """Container for a single detection result."""
     track_id: int
     class_id: int
     class_name: str
     confidence: float
-    bbox: Tuple[int, int, int, int]  # x1, y1, x2, y2
+    bbox: Tuple[int, int, int, int]
     centroid: Tuple[int, int]
     area: int
     timestamp: float = field(default_factory=time.time)
@@ -106,9 +141,12 @@ class Detection:
     plate_bbox: Optional[Tuple[int, int, int, int]] = None
     plate_text: Optional[str] = None
     speed_kmh: float = 0.0
+    speed_pixels: float = 0.0
     is_speeding: bool = False
-    parking_time: float = 0.0  # seconds in parking zone
-    parking_status: str = ""   # "", "warning", "violation"
+    parking_time: float = 0.0
+    parking_status: str = ""  # "", "warning", "violation"
+    parking_zone: Optional[str] = None
+    is_penalized: bool = False
     
     def to_dict(self) -> dict:
         return {
@@ -124,9 +162,12 @@ class Detection:
             "plate_bbox": self.plate_bbox,
             "plate_text": self.plate_text,
             "speed_kmh": round(self.speed_kmh, 1),
+            "speed_pixels": round(self.speed_pixels, 1),
             "is_speeding": self.is_speeding,
             "parking_time": round(self.parking_time, 1),
             "parking_status": self.parking_status,
+            "parking_zone": self.parking_zone,
+            "is_penalized": self.is_penalized,
         }
 
 
@@ -141,6 +182,7 @@ class FrameResult:
     image: Optional[np.ndarray] = None
     vehicle_count: int = 0
     speeding_count: int = 0
+    parking_warnings: int = 0
     parking_violations: int = 0
     signal_state: Optional[str] = None
     signal_duration: Optional[int] = None
@@ -154,6 +196,7 @@ class FrameResult:
             "inference_time_ms": round(self.inference_time_ms, 2),
             "vehicle_count": self.vehicle_count,
             "speeding_count": self.speeding_count,
+            "parking_warnings": self.parking_warnings,
             "parking_violations": self.parking_violations,
             "signal_state": self.signal_state,
             "signal_duration": self.signal_duration,
@@ -165,7 +208,6 @@ class FrameResult:
 # CLASS DEFINITIONS
 # ============================================================================
 
-# Vehicle class IDs from COCO dataset (used by YOLOv8)
 VEHICLE_CLASSES = {
     2: "car",
     3: "motorcycle", 
@@ -183,12 +225,13 @@ VEHICLE_CLASS_IDS = [2, 3, 5, 7]
 
 
 # ============================================================================
-# LAZY IMPORTS - Avoid circular imports and improve startup time
+# LAZY SERVICE IMPORTS
 # ============================================================================
 
 _ocr_service = None
 _scoring_engine = None
 _traffic_controller = None
+_tts_service = None
 
 
 def get_ocr_service():
@@ -206,7 +249,7 @@ def get_ocr_service():
 
 
 def get_scoring_engine():
-    """Lazy load scoring engine."""
+    """Lazy load scoring engine for database violations."""
     global _scoring_engine
     if _scoring_engine is None:
         try:
@@ -233,41 +276,52 @@ def get_traffic_controller():
     return _traffic_controller
 
 
+def get_tts_service():
+    """Lazy load TTS service for voice warnings."""
+    global _tts_service
+    if _tts_service is None:
+        try:
+            from app.tts import get_tts_service as _get_tts
+            _tts_service = _get_tts()
+            print("✅ TTS service loaded")
+        except ImportError as e:
+            print(f"⚠️ TTS service not available: {e}")
+            _tts_service = None
+    return _tts_service
+
+
 # ============================================================================
-# TEXT-TO-SPEECH WARNING SYSTEM
+# TTS WARNING FUNCTION
 # ============================================================================
 
-def speak_warning(message: str, use_tts: bool = False):
+def speak_warning(message: str, track_id: int = None):
     """
-    Speak a warning message or print if TTS not available.
+    Generate and play a voice warning.
     
-    Args:
-        message: Warning message to speak
-        use_tts: Whether to attempt TTS (requires edge-tts)
+    Includes cooldown to prevent spam.
     """
-    # Always log to console
+    global parking_tracker
+    
+    current_time = time.time()
+    
+    # Check TTS cooldown for this vehicle
+    if track_id is not None and track_id in parking_tracker:
+        last_tts = parking_tracker[track_id].get("tts_time", 0)
+        if (current_time - last_tts) < TTS_COOLDOWN_SECONDS:
+            return  # Skip, too soon
+        parking_tracker[track_id]["tts_time"] = current_time
+    
+    # Log to console
     print(f"[AUDIO] 🔊 {message}")
     
-    if use_tts:
+    # Try to use TTS service
+    tts = get_tts_service()
+    if tts:
         try:
-            import asyncio
-            import edge_tts
-            
-            async def _speak():
-                communicate = edge_tts.Communicate(message, "en-US-AriaNeural")
-                await communicate.save("warning.mp3")
-                # Play the audio (platform-specific)
-                import os
-                if sys.platform == "win32":
-                    os.system("start /min warning.mp3")
-                elif sys.platform == "darwin":
-                    os.system("afplay warning.mp3 &")
-                else:
-                    os.system("mpg123 -q warning.mp3 &")
-            
-            asyncio.run(_speak())
+            # Generate and play warning
+            tts.generate_warning(message, play_immediately=True)
         except Exception as e:
-            print(f"⚠️ TTS failed: {e}")
+            print(f"[TTS] Error: {e}")
 
 
 # ============================================================================
@@ -289,9 +343,7 @@ def load_model(model_path: str, device: str = "cpu") -> Any:
         model = YOLO(model_path)
         model.to(device)
         
-        load_time = time.time() - start
-        print(f"✅ Model loaded in {load_time:.2f}s")
-        
+        print(f"✅ Model loaded in {time.time() - start:.2f}s")
         _model_cache[cache_key] = model
     
     return _model_cache[cache_key]
@@ -315,79 +367,88 @@ def load_plate_model(device: str = "cpu") -> Any:
             print(f"📋 Found plate model at: {path}")
             return load_model(str(path), device)
     
-    print(f"⚠️ Plate model not found, tried: {[str(p) for p in possible_paths if p]}")
+    print(f"⚠️ Plate model not found")
     return None
 
 
 def get_models(device: str = "cpu") -> Tuple[Any, Any]:
     """Initialize and return both models."""
-    vehicle_model = load_vehicle_model(device)
-    plate_model = load_plate_model(device)
-    return vehicle_model, plate_model
+    return load_vehicle_model(device), load_plate_model(device)
+
+
+# ============================================================================
+# ZONE HELPER FUNCTIONS
+# ============================================================================
+
+def point_in_polygon(point: Tuple[int, int], polygon: List[Tuple[int, int]]) -> bool:
+    """Check if a point is inside a polygon using cv2.pointPolygonTest."""
+    polygon_np = np.array(polygon, dtype=np.int32)
+    result = cv2.pointPolygonTest(polygon_np, point, False)
+    return result >= 0
+
+
+def get_zone_for_point(point: Tuple[int, int]) -> Optional[Dict]:
+    """Find which parking zone contains a point, if any."""
+    for zone in parking_zones:
+        if point_in_polygon(point, zone["polygon"]):
+            return zone
+    return None
 
 
 # ============================================================================
 # SPEED ESTIMATION
 # ============================================================================
 
-def calculate_speed(track_id: int, centroid: Tuple[int, int], current_time: float) -> Tuple[float, bool]:
+def calculate_speed(track_id: int, centroid: Tuple[int, int], current_time: float) -> Tuple[float, float, bool]:
     """
-    Calculate vehicle speed from centroid movement between frames.
-    
-    Args:
-        track_id: Vehicle tracking ID
-        centroid: Current (x, y) centroid position
-        current_time: Current timestamp
+    Calculate vehicle speed from centroid movement.
     
     Returns:
-        Tuple of (speed_kmh, is_speeding)
+        Tuple of (speed_kmh, speed_pixels_per_sec, is_speeding)
     """
     global speed_history
     
     if track_id not in speed_history:
-        # First sighting - initialize tracking
         speed_history[track_id] = {
             "prev_centroid": centroid,
             "prev_time": current_time,
             "speed": 0.0,
+            "speed_pixels": 0.0,
             "is_speeding": False,
             "frame_count": 0,
         }
-        return 0.0, False
+        return 0.0, 0.0, False
     
     history = speed_history[track_id]
     history["frame_count"] += 1
     
-    # Calculate time delta
     time_delta = current_time - history["prev_time"]
     
-    if time_delta < 0.01:  # Less than 10ms, skip
-        return history["speed"], history["is_speeding"]
+    if time_delta < 0.01:
+        return history["speed"], history["speed_pixels"], history["is_speeding"]
     
-    # Calculate distance in pixels
     prev_x, prev_y = history["prev_centroid"]
     curr_x, curr_y = centroid
     
     distance_pixels = np.sqrt((curr_x - prev_x) ** 2 + (curr_y - prev_y) ** 2)
-    
-    # Convert to speed: pixels/second → km/h (using scale factor)
     speed_pixels_per_sec = distance_pixels / time_delta
     speed_kmh = speed_pixels_per_sec * SPEED_SCALE_FACTOR
     
-    # Smooth speed with exponential moving average
-    alpha = 0.3  # Smoothing factor
+    # Smooth with EMA
+    alpha = 0.3
     smoothed_speed = alpha * speed_kmh + (1 - alpha) * history["speed"]
+    smoothed_pixels = alpha * speed_pixels_per_sec + (1 - alpha) * history["speed_pixels"]
     
-    # Check if speeding
-    is_speeding = smoothed_speed > SPEEDING_THRESHOLD
+    # Check speeding (use pixel threshold for demo accuracy)
+    is_speeding = smoothed_pixels > SPEEDING_THRESHOLD_PIXELS
     
-    # Update history
     history["prev_centroid"] = centroid
     history["prev_time"] = current_time
     history["speed"] = smoothed_speed
+    history["speed_pixels"] = smoothed_pixels
     history["is_speeding"] = is_speeding
     
-    return smoothed_speed, is_speeding
+    return smoothed_speed, smoothed_pixels, is_speeding
 
 
 def cleanup_speed_history(active_track_ids: set):
@@ -405,98 +466,101 @@ def cleanup_speed_history(active_track_ids: set):
 
 def check_parking_violation(
     det: Detection,
-    parking_zones: List[Any] = None,
-    current_time: float = None,
-) -> Tuple[float, str]:
+    current_time: float,
+) -> Tuple[float, str, Optional[str], bool]:
     """
     Check if a vehicle is in a parking violation zone.
     
-    Args:
-        det: Detection object
-        parking_zones: List of ParkingZone objects (optional)
-        current_time: Current timestamp
-    
     Returns:
-        Tuple of (time_in_zone_seconds, status: "", "warning", "violation")
+        Tuple of (time_in_zone, status, zone_id, is_penalized)
     """
-    global parking_tracker
-    
-    if current_time is None:
-        current_time = time.time()
+    global parking_tracker, penalized_vehicles
     
     track_id = det.track_id
     
-    # Simple zone check - for demo, use frame center as "no parking zone"
-    # In production, this would use actual parking_zones from parking_detector
-    in_zone = False
-    zone_id = "demo_zone"
+    # Check if vehicle centroid is in any parking zone
+    zone = get_zone_for_point(det.centroid)
     
-    # Demo: Check if vehicle is in bottom half of frame (simulated no-parking zone)
-    # Replace with actual zone polygon checks in production
-    _, y1, _, y2 = det.bbox
-    centroid_y = det.centroid[1]
+    if zone is None:
+        # Vehicle is not in any zone
+        if track_id in parking_tracker:
+            del parking_tracker[track_id]
+        return 0.0, "", None, track_id in penalized_vehicles
     
-    # Simulate a "no parking zone" for demo purposes
-    # In production: for zone in parking_zones: if zone.contains_centroid(det): ...
-    # For now, we'll skip actual zone checking and use track-based simulation
+    zone_id = zone["id"]
+    
+    # Vehicle is stationary in a zone (speed < 5 km/h)
+    is_stationary = det.speed_kmh < 5.0
     
     if track_id in parking_tracker:
-        # Vehicle was already being tracked in zone
         entry = parking_tracker[track_id]
         time_in_zone = current_time - entry["entry_time"]
         
-        # Determine status based on time
         if time_in_zone >= PARKING_VIOLATION_SECONDS:
             status = "violation"
             
-            # Apply penalty if not already penalized
             if not entry.get("penalized", False):
+                # APPLY PENALTY TO DATABASE
                 _apply_parking_penalty(
                     track_id=track_id,
                     plate_text=det.plate_text or entry.get("plate"),
-                    zone_id=entry.get("zone_id", "unknown"),
+                    zone_id=zone_id,
                 )
                 entry["penalized"] = True
+                penalized_vehicles[track_id] = current_time
+                
+                # TTS Violation announcement
+                plate_display = det.plate_text or f"Vehicle {track_id}"
+                speak_warning(
+                    f"Violation recorded for {plate_display}. Fine has been issued.",
+                    track_id
+                )
                 
         elif time_in_zone >= PARKING_WARNING_SECONDS:
             status = "warning"
             
-            # Speak warning if not already warned
             if not entry.get("warned", False):
-                plate_display = det.plate_text or f"ID-{track_id}"
-                speak_warning(f"Vehicle {plate_display}, please move. You are in a no parking zone.")
+                # TTS Warning
+                plate_display = det.plate_text or f"Vehicle {track_id}"
+                speak_warning(
+                    f"{plate_display}, please move immediately. You are in a no parking zone.",
+                    track_id
+                )
                 entry["warned"] = True
         else:
             status = ""
         
-        # Update plate if we have a new reading
+        # Update plate if available
         if det.plate_text and not entry.get("plate"):
             entry["plate"] = det.plate_text
         
-        return time_in_zone, status
+        is_penalized = entry.get("penalized", False) or track_id in penalized_vehicles
+        return time_in_zone, status, zone_id, is_penalized
+    
     else:
-        # Vehicle just entered (or we're simulating for demo)
-        # In demo mode, only start tracking after vehicle is "stationary" (speed < 5 km/h)
-        if det.speed_kmh < 5.0 and det.speed_kmh >= 0:
+        # Start tracking if vehicle is stationary in zone
+        if is_stationary:
             parking_tracker[track_id] = {
                 "entry_time": current_time,
                 "zone_id": zone_id,
                 "warned": False,
                 "penalized": False,
                 "plate": det.plate_text,
+                "tts_time": 0,
             }
-        return 0.0, ""
+        return 0.0, "", zone_id, track_id in penalized_vehicles
 
 
 def _apply_parking_penalty(track_id: int, plate_text: str, zone_id: str):
-    """Apply parking violation penalty to scoring system."""
+    """Apply parking violation penalty to database via ScoringEngine."""
     scoring = get_scoring_engine()
     
+    driver_id = plate_text or f"UNKNOWN-{track_id}"
+    
     if scoring["engine"] is None:
-        print(f"[PENALTY] ⚠️ Scoring not available. Would penalize: {plate_text or track_id}")
+        print(f"[PENALTY] ⚠️ Scoring engine not available. Would penalize: {driver_id}")
         return
     
-    driver_id = plate_text or f"UNKNOWN-{track_id}"
     ViolationType = scoring["ViolationType"]
     
     try:
@@ -505,15 +569,40 @@ def _apply_parking_penalty(track_id: int, plate_text: str, zone_id: str):
             violation_type=ViolationType.PARKING_NO_PARKING,
             location=f"Zone: {zone_id}",
             license_plate=plate_text,
-            notes="Automated detection - illegal parking",
+            notes="Automated detection - illegal parking > 15 seconds",
         )
-        print(f"[PENALTY] 🚨 Violation recorded: {driver_id} | Score: {driver.current_score} | Fine: ${violation.fine_amount}")
-        
-        # Speak violation notice
-        speak_warning(f"Violation recorded for vehicle {driver_id}. Fine issued.")
+        print(f"[PENALTY] 🚨 DB SAVED: {driver_id} | Score: {driver.current_score} | Fine: ${violation.fine_amount}")
         
     except Exception as e:
-        print(f"[PENALTY] Error recording violation: {e}")
+        print(f"[PENALTY] Error saving to DB: {e}")
+
+
+def _apply_speeding_penalty(track_id: int, plate_text: str, speed: float):
+    """Apply speeding violation penalty to database."""
+    scoring = get_scoring_engine()
+    
+    driver_id = plate_text or f"UNKNOWN-{track_id}"
+    
+    if scoring["engine"] is None:
+        print(f"[PENALTY] ⚠️ Scoring engine not available. Would penalize speeder: {driver_id}")
+        return
+    
+    ViolationType = scoring["ViolationType"]
+    
+    try:
+        driver, violation = scoring["engine"].record_violation(
+            driver_id=driver_id,
+            violation_type=ViolationType.SPEEDING,
+            location="Traffic Camera",
+            license_plate=plate_text,
+            notes=f"Speeding: {speed:.0f} km/h detected",
+        )
+        print(f"[PENALTY] 🚨 SPEEDING DB SAVED: {driver_id} | Speed: {speed:.0f} km/h | Fine: ${violation.fine_amount}")
+        
+        penalized_vehicles[track_id] = time.time()
+        
+    except Exception as e:
+        print(f"[PENALTY] Error saving speeding to DB: {e}")
 
 
 def cleanup_parking_tracker(active_track_ids: set):
@@ -529,18 +618,7 @@ def cleanup_parking_tracker(active_track_ids: set):
 # ============================================================================
 
 def update_traffic_signal(vehicle_count: int, frame_id: int) -> Tuple[Optional[str], Optional[int]]:
-    """
-    Update traffic signal based on vehicle count.
-    
-    Called every SIGNAL_UPDATE_INTERVAL frames.
-    
-    Args:
-        vehicle_count: Number of vehicles detected
-        frame_id: Current frame number
-    
-    Returns:
-        Tuple of (signal_state, green_duration) or (None, None) if not updated
-    """
+    """Update traffic signal based on vehicle count every N frames."""
     if frame_id % SIGNAL_UPDATE_INTERVAL != 0:
         return None, None
     
@@ -550,23 +628,21 @@ def update_traffic_signal(vehicle_count: int, frame_id: int) -> Tuple[Optional[s
         return None, None
     
     try:
-        # Update timing based on vehicle count
         recommendation = controller.update_timing(vehicle_count)
-        
         state = controller.state
         duration = controller.green_duration
         
-        print(f"[SIGNAL] 🚦 Count={vehicle_count} | State={state} | Green={duration}s | Level={recommendation.get('traffic_level', 'unknown')}")
+        print(f"[SIGNAL] 🚦 Vehicles={vehicle_count} | State={state} | Green={duration}s")
         
         return state, duration
         
     except Exception as e:
-        print(f"[SIGNAL] Error updating: {e}")
+        print(f"[SIGNAL] Error: {e}")
         return None, None
 
 
 # ============================================================================
-# STAGE 1: VEHICLE TRACKING (WITH FRAME SKIPPING)
+# STAGE 1: VEHICLE TRACKING
 # ============================================================================
 
 def track_vehicles(
@@ -576,30 +652,15 @@ def track_vehicles(
     frame_id: int = 0,
 ) -> Tuple[List[Detection], bool]:
     """
-    Stage 1: Run vehicle detection with tracking and frame skipping.
-    
-    Uses YOLOv8's built-in tracker with persist=True.
-    Optimization: Only runs YOLO every YOLO_DETECTION_INTERVAL frames.
-    
-    Args:
-        model: Loaded YOLO vehicle model
-        frame: Input image (BGR format)
-        confidence: Minimum confidence threshold
-        frame_id: Current frame number
-    
-    Returns:
-        Tuple of (detections, was_detection_run)
+    Stage 1: Vehicle detection with tracking and frame skipping.
     """
     global _prev_detections
     
-    # Frame skipping optimization
     run_detection = (frame_id % YOLO_DETECTION_INTERVAL == 0)
     
     if not run_detection and _prev_detections:
-        # Return cached detections from previous frame
         return _prev_detections, False
     
-    # Run tracking on vehicle classes
     results = model.track(
         source=frame,
         conf=confidence,
@@ -624,17 +685,13 @@ def track_vehicles(
                 conf = float(boxes.conf[i].cpu().numpy())
                 cls_id = int(boxes.cls[i].cpu().numpy())
                 
-                if boxes.id is not None:
-                    track_id = int(boxes.id[i].cpu().numpy())
-                else:
-                    track_id = -1
+                track_id = int(boxes.id[i].cpu().numpy()) if boxes.id is not None else -1
                 
                 centroid = ((x1 + x2) // 2, (y1 + y2) // 2)
                 area = (x2 - x1) * (y2 - y1)
                 class_name = VEHICLE_CLASSES.get(cls_id, f"class_{cls_id}")
                 
-                # Calculate speed for this vehicle
-                speed, is_speeding = calculate_speed(track_id, centroid, current_time)
+                speed_kmh, speed_pixels, is_speeding = calculate_speed(track_id, centroid, current_time)
                 
                 detection = Detection(
                     track_id=track_id,
@@ -645,15 +702,20 @@ def track_vehicles(
                     centroid=centroid,
                     area=area,
                     timestamp=current_time,
-                    speed_kmh=speed,
+                    speed_kmh=speed_kmh,
+                    speed_pixels=speed_pixels,
                     is_speeding=is_speeding,
                 )
+                
+                # Check speeding penalty (only once per vehicle)
+                if is_speeding and track_id not in penalized_vehicles:
+                    # We'll apply penalty if plate is detected later
+                    pass
+                
                 detections.append(detection)
     
-    # Cache detections
     _prev_detections = detections
     
-    # Cleanup old tracking data
     active_ids = {d.track_id for d in detections}
     cleanup_speed_history(active_ids)
     cleanup_parking_tracker(active_ids)
@@ -662,7 +724,7 @@ def track_vehicles(
 
 
 # ============================================================================
-# STAGE 2: PLATE DETECTION WITH OCR CACHING
+# STAGE 2: PLATE DETECTION WITH OCR
 # ============================================================================
 
 def detect_plates_in_crops(
@@ -671,23 +733,7 @@ def detect_plates_in_crops(
     vehicle_detections: List[Detection],
     confidence: float = 0.2,
 ) -> Tuple[List[Tuple[int, int, int, int]], Dict[int, Dict[str, Any]]]:
-    """
-    Stage 2: Detect plates with OCR caching.
-    
-    Features:
-    - Geometric filter: Ignore plates in top 30% of vehicle
-    - OCR cooldown: Only run OCR every 2+ seconds per vehicle
-    - Text caching: Remember plate text for tracked vehicles
-    
-    Args:
-        plate_model: Loaded plate detection model
-        frame: Full input image
-        vehicle_detections: List of vehicle detections from Stage 1
-        confidence: Detection confidence threshold
-    
-    Returns:
-        Tuple of (all_plate_boxes, vehicle_plate_map)
-    """
+    """Stage 2: Plate detection with OCR caching."""
     global plate_history, ocr_cooldown
     
     if plate_model is None:
@@ -702,26 +748,17 @@ def detect_plates_in_crops(
     for det in vehicle_detections:
         vx1, vy1, vx2, vy2 = det.bbox
         
-        # Ensure valid crop coordinates
         h, w = frame.shape[:2]
-        vx1 = max(0, vx1)
-        vy1 = max(0, vy1)
-        vx2 = min(w, vx2)
-        vy2 = min(h, vy2)
+        vx1, vy1 = max(0, vx1), max(0, vy1)
+        vx2, vy2 = min(w, vx2), min(h, vy2)
         
-        crop_w = vx2 - vx1
-        crop_h = vy2 - vy1
+        crop_w, crop_h = vx2 - vx1, vy2 - vy1
         if crop_w < 50 or crop_h < 50:
             continue
         
         vehicle_crop = frame[vy1:vy2, vx1:vx2]
         
-        # Run plate detection
-        results = plate_model.predict(
-            source=vehicle_crop,
-            conf=confidence,
-            verbose=False,
-        )
+        results = plate_model.predict(source=vehicle_crop, conf=confidence, verbose=False)
         
         if results and len(results) > 0 and results[0].boxes is not None:
             boxes = results[0].boxes
@@ -730,36 +767,26 @@ def detect_plates_in_crops(
                 xyxy = boxes.xyxy[i].cpu().numpy()
                 px1, py1, px2, py2 = map(int, xyxy)
                 
-                # GEOMETRIC FILTER: Ignore plates in top 30%
-                plate_center_y = (py1 + py2) // 2
-                if plate_center_y < (crop_h * 0.3):
+                # Geometric filter: ignore top 30%
+                if (py1 + py2) // 2 < (crop_h * 0.3):
                     continue
                 
-                # Convert to real frame coordinates
-                real_px1 = vx1 + px1
-                real_py1 = vy1 + py1
-                real_px2 = vx1 + px2
-                real_py2 = vy1 + py2
-                
+                # Convert to real coordinates
+                real_px1, real_py1 = vx1 + px1, vy1 + py1
+                real_px2, real_py2 = vx1 + px2, vy1 + py2
                 plate_bbox = (real_px1, real_py1, real_px2, real_py2)
                 
-                # OCR CACHING: Check cooldown
+                # OCR with caching
                 plate_text = None
                 should_run_ocr = True
-                
                 track_id = det.track_id
                 
-                # Check if we have a cached plate text
                 if track_id in plate_history and plate_history[track_id].get("text"):
-                    # We have cached text
                     plate_text = plate_history[track_id]["text"]
-                    
-                    # Check if cooldown expired
                     last_ocr_time = ocr_cooldown.get(track_id, 0)
                     if (current_time - last_ocr_time) < OCR_COOLDOWN_SECONDS:
-                        should_run_ocr = False  # Use cached text
+                        should_run_ocr = False
                 
-                # Run OCR if needed
                 if should_run_ocr:
                     plate_crop = vehicle_crop[py1:py2, px1:px2]
                     if plate_crop.size > 0:
@@ -767,29 +794,27 @@ def detect_plates_in_crops(
                         if new_text:
                             plate_text = new_text
                             ocr_cooldown[track_id] = current_time
+                            
+                            # If this vehicle was speeding and now we have plate, penalize
+                            if det.is_speeding and track_id not in penalized_vehicles:
+                                _apply_speeding_penalty(track_id, plate_text, det.speed_kmh)
                 
                 all_plates.append(plate_bbox)
+                vehicle_plate_map[track_id] = {"bbox": plate_bbox, "text": plate_text}
                 
-                vehicle_plate_map[track_id] = {
-                    "bbox": plate_bbox,
-                    "text": plate_text,
-                }
-                
-                # Update plate history
                 plate_history[track_id] = {
                     "bbox": plate_bbox,
                     "text": plate_text,
                     "timestamp": current_time,
                     "frame_count": 0,
                 }
-                
-                break  # One plate per vehicle
+                break
     
     return all_plates, vehicle_plate_map
 
 
 def update_plate_history(vehicle_detections: List[Detection]) -> Dict[int, Dict[str, Any]]:
-    """Update plate history and return plates from memory."""
+    """Update plate history and return remembered plates."""
     global plate_history
     
     current_track_ids = {det.track_id for det in vehicle_detections}
@@ -800,10 +825,7 @@ def update_plate_history(vehicle_detections: List[Detection]) -> Dict[int, Dict[
         info["frame_count"] += 1
         
         if track_id in current_track_ids and info["frame_count"] < PLATE_HISTORY_MAX_AGE:
-            remembered_plates[track_id] = {
-                "bbox": info["bbox"],
-                "text": info.get("text"),
-            }
+            remembered_plates[track_id] = {"bbox": info["bbox"], "text": info.get("text")}
         
         if info["frame_count"] >= PLATE_HISTORY_MAX_AGE:
             to_remove.append(track_id)
@@ -817,7 +839,7 @@ def update_plate_history(vehicle_detections: List[Detection]) -> Dict[int, Dict[
 
 
 # ============================================================================
-# TWO-STAGE DETECTION PIPELINE (MAIN)
+# MAIN DETECTION PIPELINE
 # ============================================================================
 
 def detect_and_track(
@@ -827,67 +849,39 @@ def detect_and_track(
     confidence: float = 0.5,
     plate_model: Any = None,
     run_plate_detection: bool = True,
-    parking_zones: List[Any] = None,
 ) -> FrameResult:
     """
-    Run the complete optimized two-stage detection pipeline.
-    
-    Features:
-    - Frame skipping for YOLO (every 2nd frame)
-    - OCR caching (2s cooldown per vehicle)
-    - Speed estimation
-    - Parking violation detection
-    - Signal automation
-    
-    Args:
-        vehicle_model: Loaded YOLO vehicle model
-        frame: Input image (BGR format)
-        frame_id: Frame identifier
-        confidence: Vehicle detection confidence
-        plate_model: Loaded plate detection model
-        run_plate_detection: Enable plate detection
-        parking_zones: List of parking zones
-    
-    Returns:
-        FrameResult with all detection info
+    Complete detection pipeline with all integrations.
     """
     global _frame_counter, _prev_plate_boxes
     
     timestamp = time.time()
     start_time = time.time()
     
-    # ========== STAGE 1: VEHICLE TRACKING ==========
-    detections, detection_ran = track_vehicles(
-        vehicle_model, frame, confidence, _frame_counter
-    )
+    # Stage 1: Vehicle tracking
+    detections, _ = track_vehicles(vehicle_model, frame, confidence, _frame_counter)
     
-    # ========== STAGE 2: PLATE DETECTION ==========
+    # Stage 2: Plate detection
     all_plates = []
     vehicle_plate_map = {}
     
     if run_plate_detection and plate_model is not None:
-        # Only run plate detection every N frames
         if _frame_counter % PLATE_DETECTION_INTERVAL == 0:
-            all_plates, vehicle_plate_map = detect_plates_in_crops(
-                plate_model, frame, detections, confidence=0.2
-            )
+            all_plates, vehicle_plate_map = detect_plates_in_crops(plate_model, frame, detections)
             _prev_plate_boxes = all_plates
         else:
-            # Use cached plate boxes
             all_plates = _prev_plate_boxes
         
-        # Get remembered plates
         remembered_plates = update_plate_history(detections)
-        
-        # Merge: current takes priority
         for track_id, plate_info in remembered_plates.items():
             if track_id not in vehicle_plate_map:
                 vehicle_plate_map[track_id] = plate_info
                 if plate_info["bbox"] not in all_plates:
                     all_plates.append(plate_info["bbox"])
     
-    # ========== ENRICH DETECTIONS ==========
+    # Enrich detections
     speeding_count = 0
+    parking_warnings = 0
     parking_violations = 0
     
     for det in detections:
@@ -898,19 +892,22 @@ def detect_and_track(
             det.plate_bbox = plate_info["bbox"]
             det.plate_text = plate_info.get("text")
         
-        # Count speeders
         if det.is_speeding:
             speeding_count += 1
         
         # Check parking violations
-        parking_time, parking_status = check_parking_violation(det, parking_zones, timestamp)
+        parking_time, parking_status, zone_id, is_penalized = check_parking_violation(det, timestamp)
         det.parking_time = parking_time
         det.parking_status = parking_status
+        det.parking_zone = zone_id
+        det.is_penalized = is_penalized
         
-        if parking_status == "violation":
+        if parking_status == "warning":
+            parking_warnings += 1
+        elif parking_status == "violation":
             parking_violations += 1
     
-    # ========== SIGNAL AUTOMATION ==========
+    # Signal automation
     vehicle_count = len(detections)
     signal_state, signal_duration = update_traffic_signal(vehicle_count, _frame_counter)
     
@@ -926,6 +923,7 @@ def detect_and_track(
         image=frame,
         vehicle_count=vehicle_count,
         speeding_count=speeding_count,
+        parking_warnings=parking_warnings,
         parking_violations=parking_violations,
         signal_state=signal_state,
         signal_duration=signal_duration,
@@ -936,48 +934,77 @@ def detect_and_track(
 # VISUALIZATION
 # ============================================================================
 
+def draw_parking_zones(frame: np.ndarray) -> np.ndarray:
+    """Draw the parking zone boundaries on the frame."""
+    for zone in parking_zones:
+        polygon = np.array(zone["polygon"], dtype=np.int32)
+        color = zone.get("color", (0, 0, 255))
+        
+        # Draw filled polygon with transparency
+        overlay = frame.copy()
+        cv2.fillPoly(overlay, [polygon], color)
+        cv2.addWeighted(overlay, 0.2, frame, 0.8, 0, frame)
+        
+        # Draw boundary
+        cv2.polylines(frame, [polygon], True, color, 2)
+        
+        # Draw zone label
+        x, y = zone["polygon"][0]
+        cv2.putText(frame, zone["name"], (x + 5, y + 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    
+    return frame
+
+
 def draw_detections(
     frame: np.ndarray,
     result: FrameResult,
     show_labels: bool = True,
     show_track_id: bool = True,
     show_speed: bool = True,
+    show_parking_zones: bool = True,
     box_thickness: int = 2,
 ) -> np.ndarray:
     """
-    Draw detection boxes, plates, speed, and labels on frame.
+    Draw detection boxes, plates, speed, parking status.
     
-    Visual elements:
-    - Green boxes: Normal vehicles
-    - Red boxes: Speeding vehicles
-    - Orange boxes: Parking warning
-    - Magenta boxes: Parking violation
-    - Cyan boxes: License plates
-    - Speed text above vehicle box
+    Flashing purple for penalized vehicles.
     """
     annotated = frame.copy()
+    
+    # Draw parking zones first
+    if show_parking_zones:
+        annotated = draw_parking_zones(annotated)
     
     colors = {
         "car": (0, 255, 0),
         "motorcycle": (0, 200, 255),
         "bus": (255, 100, 0),
         "truck": (255, 0, 255),
-        "speeding": (0, 0, 255),       # Red
-        "warning": (0, 165, 255),      # Orange
-        "violation": (255, 0, 255),    # Magenta
+        "speeding": (0, 0, 255),
+        "warning": (0, 165, 255),
+        "violation": (255, 0, 255),
+        "penalized": (255, 0, 255),  # Purple
     }
-    plate_color = (255, 255, 0)  # Cyan
+    plate_color = (255, 255, 0)
     
     # Draw plate boxes
     for px1, py1, px2, py2 in result.plate_boxes:
         cv2.rectangle(annotated, (px1, py1), (px2, py2), plate_color, box_thickness)
     
-    # Draw vehicle boxes and labels
+    current_time = time.time()
+    
     for det in result.detections:
         x1, y1, x2, y2 = det.bbox
         
         # Choose color based on status
-        if det.parking_status == "violation":
+        if det.is_penalized:
+            # Flashing purple effect
+            if int(current_time * 4) % 2 == 0:
+                color = colors["penalized"]
+            else:
+                color = (128, 0, 128)  # Darker purple
+        elif det.parking_status == "violation":
             color = colors["violation"]
         elif det.parking_status == "warning":
             color = colors["warning"]
@@ -987,7 +1014,8 @@ def draw_detections(
             color = colors.get(det.class_name, (0, 255, 0))
         
         # Draw vehicle box
-        cv2.rectangle(annotated, (x1, y1), (x2, y2), color, box_thickness)
+        thickness = 3 if det.is_penalized else box_thickness
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), color, thickness)
         
         # Draw speed above box
         if show_speed and det.speed_kmh > 0:
@@ -996,13 +1024,11 @@ def draw_detections(
                 speed_text += " SPEEDING!"
             
             font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = 0.6
-            thickness = 2
-            (tw, th), _ = cv2.getTextSize(speed_text, font, font_scale, thickness)
+            (tw, th), _ = cv2.getTextSize(speed_text, font, 0.6, 2)
             
             speed_color = (0, 0, 255) if det.is_speeding else (255, 255, 255)
             cv2.rectangle(annotated, (x1, y1 - th - 25), (x1 + tw + 4, y1 - 15), (0, 0, 0), -1)
-            cv2.putText(annotated, speed_text, (x1 + 2, y1 - 18), font, font_scale, speed_color, thickness)
+            cv2.putText(annotated, speed_text, (x1 + 2, y1 - 18), font, 0.6, speed_color, 2)
         
         # Build label
         if show_labels or show_track_id:
@@ -1016,40 +1042,37 @@ def draw_detections(
             
             label = " | ".join(label_parts)
             
-            # Add plate text or parking status
             if det.plate_text:
                 label += f" | {det.plate_text}"
             elif det.has_plate:
                 label += " [Plate]"
             
-            if det.parking_status:
-                label += f" | {det.parking_status.upper()}: {det.parking_time:.0f}s"
+            # Parking timer
+            if det.parking_time > 0:
+                label += f" | Parked: {det.parking_time:.0f}s"
+                if det.parking_status:
+                    label += f" [{det.parking_status.upper()}]"
             
-            # Draw label
+            if det.is_penalized:
+                label += " | PENALIZED!"
+            
             font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = 0.5
-            thickness = 1
-            (tw, th), _ = cv2.getTextSize(label, font, font_scale, thickness)
+            (tw, th), _ = cv2.getTextSize(label, font, 0.5, 1)
             
-            bg_color = color
-            cv2.rectangle(annotated, (x1, y1 - th - 10), (x1 + tw + 4, y1), bg_color, -1)
-            cv2.putText(annotated, label, (x1 + 2, y1 - 5), font, font_scale, (255, 255, 255), thickness)
+            cv2.rectangle(annotated, (x1, y1 - th - 10), (x1 + tw + 4, y1), color, -1)
+            cv2.putText(annotated, label, (x1 + 2, y1 - 5), font, 0.5, (255, 255, 255), 1)
     
     return annotated
 
 
-def draw_frame_info(
-    frame: np.ndarray,
-    result: FrameResult,
-    extra_info: str = "",
-) -> np.ndarray:
+def draw_frame_info(frame: np.ndarray, result: FrameResult, extra_info: str = "") -> np.ndarray:
     """Draw frame information overlay."""
     info_parts = [
         f"Frame: {result.frame_id}",
         f"Vehicles: {result.vehicle_count}",
         f"Plates: {len(result.plate_boxes)}",
         f"Speeding: {result.speeding_count}",
-        f"Parking: {result.parking_violations}",
+        f"Parking: W={result.parking_warnings} V={result.parking_violations}",
         f"{result.inference_time_ms:.0f}ms",
     ]
     
@@ -1062,18 +1085,16 @@ def draw_frame_info(
     info_text = " | ".join(info_parts)
     
     font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 0.6
-    thickness = 2
-    (tw, th), _ = cv2.getTextSize(info_text, font, font_scale, thickness)
+    (tw, th), _ = cv2.getTextSize(info_text, font, 0.6, 2)
     
     cv2.rectangle(frame, (5, 5), (tw + 15, th + 15), (0, 0, 0), -1)
-    cv2.putText(frame, info_text, (10, th + 8), font, font_scale, (0, 255, 0), thickness)
+    cv2.putText(frame, info_text, (10, th + 8), font, 0.6, (0, 255, 0), 2)
     
     return frame
 
 
 # ============================================================================
-# VIDEO PROCESSING GENERATOR
+# VIDEO PROCESSING
 # ============================================================================
 
 def process_video(
@@ -1085,10 +1106,9 @@ def process_video(
     max_frames: Optional[int] = None,
     enable_plate_detection: bool = True,
 ) -> Generator[FrameResult, None, None]:
-    """Process a video file with optimized two-stage detection."""
+    """Process a video file with full detection pipeline."""
     global _frame_counter, _prev_detections, _prev_plate_boxes
     
-    # Reset global state
     _frame_counter = 0
     _prev_detections = []
     _prev_plate_boxes = []
@@ -1131,36 +1151,18 @@ def process_video(
             
             if max_frames and processed >= max_frames:
                 break
-                
     finally:
         cap.release()
 
 
 # ============================================================================
-# LEGACY COMPATIBILITY
-# ============================================================================
-
-def detect_plates(
-    plate_model: Any,
-    frame: np.ndarray,
-    vehicle_detections: List[Detection],
-    confidence: float = 0.3,
-) -> Tuple[List[Tuple[int, int, int, int]], Dict[int, Tuple[int, int, int, int]]]:
-    """Legacy function for plate detection."""
-    plates, plate_map = detect_plates_in_crops(plate_model, frame, vehicle_detections, confidence)
-    # Convert to legacy format
-    legacy_map = {tid: info["bbox"] for tid, info in plate_map.items()}
-    return plates, legacy_map
-
-
-# ============================================================================
-# RESET FUNCTION (for new video sessions)
+# UTILITY FUNCTIONS
 # ============================================================================
 
 def reset_state():
-    """Reset all global tracking state. Call when starting a new video."""
+    """Reset all global tracking state."""
     global _frame_counter, _prev_detections, _prev_plate_boxes
-    global plate_history, ocr_cooldown, speed_history, parking_tracker
+    global plate_history, ocr_cooldown, speed_history, parking_tracker, penalized_vehicles
     
     _frame_counter = 0
     _prev_detections = []
@@ -1169,8 +1171,23 @@ def reset_state():
     ocr_cooldown.clear()
     speed_history.clear()
     parking_tracker.clear()
+    penalized_vehicles.clear()
     
     print("🔄 Detection state reset")
+
+
+def set_parking_zones(zones: List[Dict]):
+    """Update parking zones at runtime."""
+    global parking_zones
+    parking_zones = zones
+    print(f"📍 Updated parking zones: {len(zones)} zones")
+
+
+def detect_plates(plate_model, frame, vehicle_detections, confidence=0.3):
+    """Legacy compatibility function."""
+    plates, plate_map = detect_plates_in_crops(plate_model, frame, vehicle_detections, confidence)
+    legacy_map = {tid: info["bbox"] for tid, info in plate_map.items()}
+    return plates, legacy_map
 
 
 # ============================================================================
@@ -1180,28 +1197,27 @@ def reset_state():
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description="Optimized Two-Stage Detection")
+    parser = argparse.ArgumentParser(description="Full Integration Detection")
     parser.add_argument("--video", type=str, help="Path to video file")
     parser.add_argument("--confidence", type=float, default=0.5)
     parser.add_argument("--no-plates", action="store_true")
     parser.add_argument("--display", action="store_true")
     args = parser.parse_args()
     
-    print("🚀 Initializing Optimized Detection Pipeline...")
-    print(f"   YOLO Interval: Every {YOLO_DETECTION_INTERVAL} frames")
-    print(f"   Plate Interval: Every {PLATE_DETECTION_INTERVAL} frames")
+    print("🚀 Full Integration Detection Pipeline")
+    print(f"   YOLO Interval: {YOLO_DETECTION_INTERVAL}")
+    print(f"   Plate Interval: {PLATE_DETECTION_INTERVAL}")
     print(f"   OCR Cooldown: {OCR_COOLDOWN_SECONDS}s")
-    print(f"   Speeding Threshold: {SPEEDING_THRESHOLD} km/h")
+    print(f"   Speeding: {SPEEDING_THRESHOLD_PIXELS} px/s")
+    print(f"   Parking Warning: {PARKING_WARNING_SECONDS}s")
+    print(f"   Parking Violation: {PARKING_VIOLATION_SECONDS}s")
+    print(f"   Parking Zones: {len(parking_zones)}")
     
     vehicle_model, plate_model = get_models()
     
-    if args.video:
-        video_path = args.video
-    else:
-        video_path = str(Path(__file__).parent.parent.parent.parent / "data" / "videos" / "traffic_sample.mp4")
+    video_path = args.video or str(Path(__file__).parent.parent.parent.parent / "data" / "videos" / "traffic_sample.mp4")
     
     print(f"📹 Processing: {video_path}")
-    
     reset_state()
     
     for result in process_video(
@@ -1214,14 +1230,14 @@ if __name__ == "__main__":
         annotated = draw_detections(result.image, result)
         annotated = draw_frame_info(annotated, result)
         
-        print(f"Frame {result.frame_id}: V={result.vehicle_count} P={len(result.plate_boxes)} S={result.speeding_count} {result.inference_time_ms:.1f}ms")
+        print(f"F{result.frame_id}: V={result.vehicle_count} P={len(result.plate_boxes)} S={result.speeding_count} Park={result.parking_warnings}/{result.parking_violations} {result.inference_time_ms:.0f}ms")
         
         if args.display:
-            cv2.imshow("Optimized Detection", annotated)
+            cv2.imshow("Detection", annotated)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
     
     if args.display:
         cv2.destroyAllWindows()
     
-    print("✅ Processing complete!")
+    print("✅ Complete!")
