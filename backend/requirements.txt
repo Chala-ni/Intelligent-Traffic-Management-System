@@ -18,13 +18,16 @@ numpy>=1.24.0,<2.0.0
 # --- PyTorch CPU-only (install separately with --index-url) ---
 # Run: pip install torch==2.2.0+cpu torchvision==0.17.0+cpu --index-url https://download.pytorch.org/whl/cpu
 
+# --- OCR (License Plate Recognition) ---
+easyocr==1.7.1
+
 # --- Video Download ---
 yt-dlp==2024.12.6
 
-# --- Fuzzy Logic ---
+# --- Fuzzy Logic (Traffic Signal Control) ---
 scikit-fuzzy==0.5.0
 
-# --- Text-to-Speech ---
+# --- Text-to-Speech (Voice Warnings) ---
 edge-tts==6.1.19
 pyttsx3==2.98
 
