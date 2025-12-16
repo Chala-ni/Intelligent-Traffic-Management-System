@@ -1215,7 +1215,7 @@ if __name__ == "__main__":
     
     vehicle_model, plate_model = get_models()
     
-    video_path = args.video or str(Path(__file__).parent.parent.parent.parent / "data" / "videos" / "traffic_sample.mp4")
+    video_path = args.video or str(Path(__file__).parent.parent.parent.parent / "data" / "videos" / "SriLankan_Traffic_Video.mp4")
     
     print(f"📹 Processing: {video_path}")
     reset_state()
