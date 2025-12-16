@@ -6,14 +6,24 @@ Uses edge-tts for natural voices with pyttsx3 as offline fallback.
 import os
 import sys
 import asyncio
+import subprocess
 from pathlib import Path
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict
 import threading
+import hashlib
 
 # Determine paths
 TTS_DIR = Path(__file__).parent
 WARNINGS_DIR = TTS_DIR / "warnings"
+
+# Pre-cached common warning messages (text -> filename)
+COMMON_WARNINGS: Dict[str, str] = {
+    "parking_warning": "Warning. Vehicle detected in no parking zone.",
+    "parking_violation": "Parking violation confirmed. Fine will be issued.",
+    "speeding_warning": "Speed violation detected. Please slow down.",
+    "general_warning": "Traffic violation detected.",
+}
 
 
 class TTSService:
@@ -36,12 +46,77 @@ class TTSService:
         self._edge_tts_available = self._check_edge_tts()
         self._pyttsx3_available = self._check_pyttsx3()
         self._pyttsx3_engine = None
+        self._warning_cache: Dict[str, Path] = {}  # text_hash -> filepath
         
         print(f"🔊 TTS Service initialized")
         print(f"   Voice: {self.voice}")
         print(f"   Warnings dir: {WARNINGS_DIR}")
         print(f"   edge-tts: {self._edge_tts_available}")
         print(f"   pyttsx3: {self._pyttsx3_available}")
+        
+        # Pre-load cached warning files
+        self._preload_common_warnings()
+    
+    def _preload_common_warnings(self):
+        """Load existing warning files into cache for instant playback."""
+        if not WARNINGS_DIR.exists():
+            return
+        
+        # Look for common warning files
+        for warning_key, text in COMMON_WARNINGS.items():
+            filepath = WARNINGS_DIR / f"{warning_key}.mp3"
+            if filepath.exists():
+                text_hash = self._hash_text(text)
+                self._warning_cache[text_hash] = filepath
+                self._warning_cache[warning_key] = filepath
+                print(f"   📦 Cached: {warning_key}.mp3")
+    
+    def _hash_text(self, text: str) -> str:
+        """Generate a hash for caching text-based lookups."""
+        return hashlib.md5(text.lower().strip().encode()).hexdigest()[:16]
+    
+    def play_cached_warning(self, warning_key: str) -> bool:
+        """
+        Play a pre-generated cached warning instantly (non-blocking).
+        
+        Args:
+            warning_key: One of 'parking_warning', 'parking_violation', 
+                        'speeding_warning', 'general_warning'
+        
+        Returns:
+            True if played successfully
+        """
+        # First check direct key lookup
+        if warning_key in self._warning_cache:
+            return self.play_audio(self._warning_cache[warning_key])
+        
+        # Try to find the file directly
+        filepath = WARNINGS_DIR / f"{warning_key}.mp3"
+        if filepath.exists():
+            self._warning_cache[warning_key] = filepath
+            return self.play_audio(filepath)
+        
+        # Try alternative names
+        alt_names = [
+            f"{warning_key}_test.mp3",
+            f"warning_{warning_key}.mp3",
+        ]
+        for alt in alt_names:
+            alt_path = WARNINGS_DIR / alt
+            if alt_path.exists():
+                self._warning_cache[warning_key] = alt_path
+                return self.play_audio(alt_path)
+        
+        print(f"[TTS] ⚠️ No cached audio for: {warning_key}")
+        return False
+    
+    def play_any_warning(self) -> bool:
+        """Play any available warning file (for testing)."""
+        if WARNINGS_DIR.exists():
+            files = list(WARNINGS_DIR.glob("*.mp3"))
+            if files:
+                return self.play_audio(files[0])
+        return False
     
     def _ensure_directories(self):
         """Create necessary directories."""
@@ -254,14 +329,29 @@ class TTSService:
             filepath_str = str(filepath.absolute())
             
             if sys.platform == "win32":
-                # Windows: Play in background, minimized, no visible window
-                os.system(f'start /min "" "{filepath_str}"')
+                # Windows: Play in background using subprocess (non-blocking)
+                # Use CREATE_NO_WINDOW flag to prevent console popup
+                CREATE_NO_WINDOW = 0x08000000
+                subprocess.Popen(
+                    ['cmd', '/c', 'start', '/min', '', filepath_str],
+                    creationflags=CREATE_NO_WINDOW,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
             elif sys.platform == "darwin":
                 # macOS: Use afplay in background
-                os.system(f'afplay "{filepath_str}" &')
+                subprocess.Popen(
+                    ['afplay', filepath_str],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
             else:
                 # Linux: Use mpg123 in quiet mode, background
-                os.system(f'mpg123 -q "{filepath_str}" &')
+                subprocess.Popen(
+                    ['mpg123', '-q', filepath_str],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
             
             print(f"[TTS] 🔊 Playing: {filepath.name}")
             return True

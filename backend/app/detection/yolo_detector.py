@@ -294,9 +294,15 @@ def get_tts_service():
 # TTS WARNING FUNCTION
 # ============================================================================
 
-def speak_warning(message: str, track_id: int = None):
+def speak_warning(message: str, track_id: int = None, warning_type: str = None):
     """
-    Generate and play a voice warning.
+    Play a voice warning using cached audio files (instant, non-blocking).
+    
+    Args:
+        message: The warning message (used for logging)
+        track_id: Vehicle track ID (for cooldown tracking)
+        warning_type: Type of warning - 'parking_warning', 'parking_violation', 
+                     'speeding_warning'. If None, tries to detect from message.
     
     Includes cooldown to prevent spam.
     """
@@ -314,12 +320,29 @@ def speak_warning(message: str, track_id: int = None):
     # Log to console
     print(f"[AUDIO] 🔊 {message}")
     
-    # Try to use TTS service
+    # Detect warning type from message if not provided
+    if warning_type is None:
+        msg_lower = message.lower()
+        if "parking" in msg_lower and "violation" in msg_lower:
+            warning_type = "parking_violation"
+        elif "parking" in msg_lower:
+            warning_type = "parking_warning"
+        elif "speed" in msg_lower:
+            warning_type = "speeding_warning"
+        else:
+            warning_type = "parking_warning"  # Default
+    
+    # Try to use TTS service - play cached audio (instant, non-blocking)
     tts = get_tts_service()
     if tts:
         try:
-            # Generate and play warning
-            tts.generate_warning(message, play_immediately=True)
+            # Try cached playback first (instant, no generation)
+            played = tts.play_cached_warning(warning_type)
+            if not played:
+                # Fallback: play any available warning file
+                played = tts.play_any_warning()
+            if not played:
+                print(f"[TTS] No audio files available")
         except Exception as e:
             print(f"[TTS] Error: {e}")
 

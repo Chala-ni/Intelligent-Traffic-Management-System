@@ -149,12 +149,13 @@ async def generate_mjpeg_frames(
                     _pipeline_state["last_frame_time"] = time.time()
                     
                     # Draw parking zones overlay (if available)
-                    try:
-                        parking_detector = await get_detector()
-                        if parking_detector:
-                            frame = parking_detector.draw_zones(frame)
-                    except Exception:
-                        pass
+                    # Skip parking zones for now to avoid blocking
+                    # try:
+                    #     parking_detector = await get_detector()
+                    #     if parking_detector:
+                    #         frame = parking_detector.draw_zones(frame)
+                    # except Exception:
+                    #     pass
 
                     # Draw detections using new visualization API
                     frame = draw_detections(frame, result)
@@ -212,10 +213,19 @@ async def stream_video(
     """
     # Default to sample video if no source specified
     if not source:
-        source = str(settings.data_dir / "videos" / "traffic_sample.mp4")
+        source = str(settings.data_dir / "videos" / "SriLankan_Traffic_Video.mp4")
     
     if not Path(source).exists():
-        raise HTTPException(status_code=404, detail=f"Video not found: {source}")
+        # Try fallback to any video in the directory
+        videos_dir = Path(settings.data_dir) / "videos"
+        if videos_dir.exists():
+            video_files = list(videos_dir.glob("*.mp4"))
+            if video_files:
+                source = str(video_files[0])
+            else:
+                raise HTTPException(status_code=404, detail=f"No video files found in {videos_dir}")
+        else:
+            raise HTTPException(status_code=404, detail=f"Video not found: {source}")
     
     return StreamingResponse(
         generate_mjpeg_frames(
