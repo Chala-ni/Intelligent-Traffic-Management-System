@@ -216,13 +216,24 @@ VEHICLE_CLASSES = {
     7: "truck",
 }
 
+# Emergency vehicle classes (for YOLO retraining)
+EMERGENCY_CLASSES = {
+    8: "ambulance",
+    # Future additions:
+    # 9: "fire_truck",
+    # 10: "police_car",
+}
+
 TRAFFIC_CLASSES = {
     **VEHICLE_CLASSES,
+    **EMERGENCY_CLASSES,
     0: "person",
     1: "bicycle",
 }
 
 VEHICLE_CLASS_IDS = [2, 3, 5, 7]
+EMERGENCY_CLASS_IDS = [8]  # Ambulance - triggers emergency mode
+ALL_VEHICLE_CLASS_IDS = VEHICLE_CLASS_IDS + EMERGENCY_CLASS_IDS
 
 
 # ============================================================================
@@ -264,17 +275,83 @@ def get_scoring_engine():
 
 
 def get_traffic_controller():
-    """Lazy load traffic signal controller."""
+    """Lazy load 4-way traffic signal controller."""
     global _traffic_controller
     if _traffic_controller is None:
         try:
-            from app.fuzzy.traffic_controller import get_signal
-            _traffic_controller = get_signal()
-            print("✅ Traffic controller loaded")
+            from app.fuzzy.traffic_controller import get_four_way_controller
+            _traffic_controller = get_four_way_controller()
+            print("[OK] 4-Way Traffic controller loaded")
         except ImportError as e:
-            print(f"⚠️ Traffic controller not available: {e}")
+            print(f"[WARNING] Traffic controller not available: {e}")
             _traffic_controller = None
     return _traffic_controller
+
+
+# Emergency detection state
+_last_emergency_detection_time: float = 0
+EMERGENCY_COOLDOWN_SECONDS: float = 30.0  # Don't re-trigger for 30 seconds
+
+
+def check_for_emergency_vehicle(detections: list) -> tuple:
+    """
+    Check if any detection is an emergency vehicle (ambulance).
+    
+    Args:
+        detections: List of Detection objects from current frame.
+        
+    Returns:
+        Tuple of (is_emergency, vehicle_type, track_id)
+    """
+    for det in detections:
+        if det.class_id in EMERGENCY_CLASS_IDS:
+            vehicle_type = EMERGENCY_CLASSES.get(det.class_id, 'emergency')
+            return (True, vehicle_type, det.track_id)
+    return (False, None, None)
+
+
+def trigger_emergency_if_detected(detections: list) -> dict:
+    """
+    If an ambulance is detected, trigger emergency mode on the 4-way controller.
+    Includes cooldown to prevent spam.
+    
+    Args:
+        detections: List of Detection objects from current frame.
+        
+    Returns:
+        Dict with emergency status or None if no emergency.
+    """
+    global _last_emergency_detection_time
+    
+    is_emergency, vehicle_type, track_id = check_for_emergency_vehicle(detections)
+    
+    if not is_emergency:
+        return None
+    
+    current_time = time.time()
+    
+    # Check cooldown
+    if (current_time - _last_emergency_detection_time) < EMERGENCY_COOLDOWN_SECONDS:
+        return {'status': 'cooldown', 'message': 'Emergency mode already active'}
+    
+    _last_emergency_detection_time = current_time
+    
+    # Trigger emergency on traffic controller
+    controller = get_traffic_controller()
+    if controller:
+        result = controller.activate_emergency_mode('north')  # Video = North lane
+        
+        # Play TTS alert
+        speak_warning(
+            f"Emergency! {vehicle_type.title()} detected. Clearing North lane.",
+            track_id=track_id,
+            warning_type="emergency"
+        )
+        
+        print(f"[EMERGENCY] {vehicle_type.upper()} detected (Track ID: {track_id}) - North lane forced GREEN!")
+        return result
+    
+    return {'status': 'error', 'message': 'Traffic controller not available'}
 
 
 def get_tts_service():
@@ -638,27 +715,49 @@ def cleanup_parking_tracker(active_track_ids: set):
 
 
 # ============================================================================
-# SIGNAL AUTOMATION
+# SIGNAL AUTOMATION (4-WAY JUNCTION)
 # ============================================================================
 
-def update_traffic_signal(vehicle_count: int, frame_id: int) -> Tuple[Optional[str], Optional[int]]:
-    """Update traffic signal based on vehicle count every N frames."""
-    if frame_id % SIGNAL_UPDATE_INTERVAL != 0:
-        return None, None
+def update_traffic_signal(vehicle_count: int, frame_id: int, detections: list = None) -> Tuple[Optional[str], Optional[int]]:
+    """
+    Update 4-way traffic signal based on vehicle count.
+    Also checks for emergency vehicles (ambulance) to trigger emergency mode.
     
+    Args:
+        vehicle_count: Number of vehicles detected (for North lane)
+        frame_id: Current frame number
+        detections: List of Detection objects (for emergency vehicle check)
+    
+    Returns:
+        Tuple of (current_state, green_remaining)
+    """
     controller = get_traffic_controller()
     
     if controller is None:
         return None, None
     
     try:
-        recommendation = controller.update_timing(vehicle_count)
-        state = controller.state
-        duration = controller.green_duration
+        # Check for emergency vehicles (ambulance) if detections provided
+        if detections:
+            emergency_result = trigger_emergency_if_detected(detections)
+            if emergency_result and emergency_result.get('status') == 'emergency_activated':
+                return 'green', controller.emergency_duration
         
-        print(f"[SIGNAL] 🚦 Vehicles={vehicle_count} | State={state} | Green={duration}s")
+        # Update North lane count (real YOLO data)
+        controller.update_north_count(vehicle_count)
         
-        return state, duration
+        # Auto-tick advances the signal based on elapsed time
+        if frame_id % SIGNAL_UPDATE_INTERVAL == 0:
+            states = controller.auto_tick()
+            current_green = states['current_green']
+            state = states['lanes'][current_green]['state']
+            remaining = states['green_remaining']
+            
+            print(f"[SIGNAL] 4-WAY | Green: {current_green.upper()} | State={state} | Remaining={remaining}s | Emergency={states['emergency_mode']}")
+            
+            return state, remaining
+        
+        return None, None
         
     except Exception as e:
         print(f"[SIGNAL] Error: {e}")
@@ -931,9 +1030,9 @@ def detect_and_track(
         elif parking_status == "violation":
             parking_violations += 1
     
-    # Signal automation
+    # Signal automation (4-way junction with emergency detection)
     vehicle_count = len(detections)
-    signal_state, signal_duration = update_traffic_signal(vehicle_count, _frame_counter)
+    signal_state, signal_duration = update_traffic_signal(vehicle_count, _frame_counter, detections)
     
     _frame_counter += 1
     inference_time = (time.time() - start_time) * 1000

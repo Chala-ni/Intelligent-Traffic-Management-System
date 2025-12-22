@@ -337,39 +337,108 @@
         // Fetch signal status
         async function fetchStatus() {
             try {
-                const response = await fetch(`${API_BASE}/signal/status`);
+                // Fetch 4-way junction status
+                const response = await fetch(`${API_BASE}/signal/4way/status`);
                 if (!response.ok) throw new Error('API error');
                 
                 const data = await response.json();
-                updateUI(data);
+                updateUI4Way(data);
                 setConnectionStatus(true);
             } catch (error) {
-                console.error('Error fetching status:', error);
-                setConnectionStatus(false);
-                document.getElementById('errorMessage').textContent = 'Failed to connect to API';
+                console.error('Error fetching 4-way status, falling back to legacy:', error);
+                // Fallback to legacy single signal
+                try {
+                    const response = await fetch(`${API_BASE}/signal/status`);
+                    if (!response.ok) throw new Error('API error');
+                    const data = await response.json();
+                    updateUI(data);
+                    setConnectionStatus(true);
+                } catch (e) {
+                    setConnectionStatus(false);
+                    document.getElementById('errorMessage').textContent = 'Failed to connect to API';
+                }
             }
         }
 
-        // Update signal timing
+        // Update signal timing (4-way)
         async function updateSignal() {
             const vehicleCount = parseInt(document.getElementById('vehicleSlider').value);
             
             try {
-                const response = await fetch(`${API_BASE}/signal/update`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ vehicle_count: vehicleCount })
+                // Update North lane count via 4-way API
+                const response = await fetch(`${API_BASE}/signal/4way/update?vehicle_count=${vehicleCount}`, {
+                    method: 'POST'
                 });
                 
                 if (!response.ok) throw new Error('API error');
                 
                 const data = await response.json();
-                updateUI(data.signal_status);
+                updateUI4Way(data.junction_status);
                 document.getElementById('errorMessage').textContent = '';
             } catch (error) {
                 console.error('Error updating signal:', error);
-                document.getElementById('errorMessage').textContent = 'Failed to update signal';
+                // Fallback to legacy
+                try {
+                    const response = await fetch(`${API_BASE}/signal/update`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ vehicle_count: vehicleCount })
+                    });
+                    if (response.ok) {
+                        const data = await response.json();
+                        updateUI(data.signal_status);
+                    }
+                } catch (e) {
+                    document.getElementById('errorMessage').textContent = 'Failed to update signal';
+                }
             }
+        }
+
+        // Update UI with 4-way data
+        function updateUI4Way(data) {
+            // Find the current green lane
+            const currentGreen = data.current_green;
+            const greenLane = data.lanes[currentGreen];
+            const state = greenLane.state;
+            
+            // Update lights based on current green lane's state
+            const lights = ['red', 'yellow', 'green'];
+            lights.forEach(light => {
+                const el = document.getElementById(light + 'Light');
+                if (state === light) {
+                    el.classList.add('active');
+                } else {
+                    el.classList.remove('active');
+                }
+            });
+
+            // Update timer
+            const timer = document.getElementById('timer');
+            const remaining = data.is_yellow_phase ? data.yellow_remaining : data.green_remaining;
+            timer.textContent = remaining + 's';
+            timer.className = 'timer ' + state;
+
+            // Update status values
+            document.getElementById('stateValue').textContent = state.toUpperCase() + ' (' + currentGreen.toUpperCase() + ')';
+            document.getElementById('stateValue').style.color = getStateColor(state);
+            
+            // Show traffic level based on north lane
+            const northCount = data.lanes.north.vehicle_count;
+            let trafficLevel = 'low';
+            if (northCount > 8) trafficLevel = 'high';
+            else if (northCount > 2) trafficLevel = 'medium';
+            
+            const trafficLevelEl = document.getElementById('trafficLevel');
+            trafficLevelEl.textContent = trafficLevel.toUpperCase() + (data.emergency_mode ? ' [EMERGENCY]' : '');
+            trafficLevelEl.className = 'status-value ' + trafficLevel;
+            if (data.emergency_mode) trafficLevelEl.style.color = '#ff0000';
+
+            document.getElementById('greenDuration').textContent = data.green_remaining + 's';
+            document.getElementById('redDuration').textContent = '~' + (30 - data.green_remaining) + 's';
+            document.getElementById('vehicleCount').textContent = northCount + ' (N)';
+            
+            // Log to console for debugging
+            console.log(`[4WAY] Green=${currentGreen.toUpperCase()} State=${state} Remaining=${remaining}s North=${northCount}`);
         }
 
         // Update UI with signal data
