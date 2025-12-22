@@ -311,7 +311,6 @@
                     <span class="vehicle-count-display" id="sliderValue">5</span>
                 </div>
                 <button id="updateBtn" onclick="updateSignal()">Update Signal Timing</button>
-                <button class="btn-secondary" onclick="tickSignal()">⏱️ Advance Timer (1s)</button>
             </div>
 
             <!-- Fuzzy Logic Info -->
@@ -373,22 +372,6 @@
             }
         }
 
-        // Tick signal timer
-        async function tickSignal() {
-            try {
-                const response = await fetch(`${API_BASE}/signal/tick?seconds=1`, {
-                    method: 'POST'
-                });
-                
-                if (!response.ok) throw new Error('API error');
-                
-                const data = await response.json();
-                updateUI(data.signal_status);
-            } catch (error) {
-                console.error('Error ticking signal:', error);
-            }
-        }
-
         // Update UI with signal data
         function updateUI(data) {
             // Update lights
@@ -443,7 +426,7 @@
         // Start polling
         function startPolling() {
             fetchStatus(); // Initial fetch
-            pollInterval = setInterval(fetchStatus, 2000); // Poll every 2 seconds
+            pollInterval = setInterval(fetchStatus, 500); // Poll every 500ms for real-time updates
         }
 
         // Stop polling

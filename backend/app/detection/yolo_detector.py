@@ -48,12 +48,13 @@ OCR_COOLDOWN_SECONDS: float = 2.0
 
 # Speed estimation (pixels/sec to km/h)
 SPEED_SCALE_FACTOR: float = 0.5
-SPEEDING_THRESHOLD_KMH: float = 80.0
-SPEEDING_THRESHOLD_PIXELS: float = 150.0  # pixels/second for demo
+# Lowered thresholds for demo sensitivity
+SPEEDING_THRESHOLD_KMH: float = 60.0  # km/h threshold (for display/logic informative)
+SPEEDING_THRESHOLD_PIXELS: float = 120.0  # pixels/second for demo (more sensitive)
 
-# Parking violation timing
-PARKING_WARNING_SECONDS: float = 5.0
-PARKING_VIOLATION_SECONDS: float = 15.0
+# Parking violation timing (shorter for demo sensitivity)
+PARKING_WARNING_SECONDS: float = 3.0  # seconds before a warning
+PARKING_VIOLATION_SECONDS: float = 8.0  # seconds before a violation
 
 # Signal automation interval
 SIGNAL_UPDATE_INTERVAL: int = 30  # frames (~1 second at 30fps)

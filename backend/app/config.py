@@ -36,7 +36,8 @@ class Settings(BaseSettings):
     input_resolution: tuple = (1280, 720)  # Downscale input to this resolution
     
     # --- Parking Violation Settings ---
-    parking_duration_threshold: int = 30  # Seconds before parking violation
+    # Reduced defaults for demo sensitivity
+    parking_duration_threshold: int = 10  # Seconds before parking violation (demo)
     parking_speed_threshold: float = 2.0  # km/h - below this is considered stopped
     parking_min_overlap: float = 0.3  # Min bbox overlap to consider vehicle in zone
     parking_snapshot_dir: Path = data_dir / "snapshots"

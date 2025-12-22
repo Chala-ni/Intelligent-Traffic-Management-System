@@ -8,6 +8,8 @@ This module demonstrates fuzzy inference systems for traffic signal optimization
 Uses scikit-fuzzy for fuzzy set operations and rule-based inference.
 """
 
+import time
+import asyncio
 import numpy as np
 
 try:
@@ -59,10 +61,11 @@ class FuzzyTrafficController:
         # Output: Green light duration (10 to 60 seconds)
         self.green_duration = ctrl.Consequent(np.arange(self.min_green, self.max_green + 1, 1), 'green_duration')
         
-        # Define membership functions for vehicle count
-        self.vehicle_count['low'] = fuzz.trimf(self.vehicle_count.universe, [0, 0, 8])
-        self.vehicle_count['medium'] = fuzz.trimf(self.vehicle_count.universe, [5, 12, 20])
-        self.vehicle_count['high'] = fuzz.trimf(self.vehicle_count.universe, [15, 30, 30])
+        # Define membership functions for vehicle count (shifted lower for demo)
+        # Low: mostly 0-4, Medium: 2-12, High: 8-30
+        self.vehicle_count['low'] = fuzz.trimf(self.vehicle_count.universe, [0, 0, 4])
+        self.vehicle_count['medium'] = fuzz.trimf(self.vehicle_count.universe, [2, 6, 12])
+        self.vehicle_count['high'] = fuzz.trimf(self.vehicle_count.universe, [8, 15, 30])
         
         # Define membership functions for green duration
         self.green_duration['short'] = fuzz.trimf(self.green_duration.universe, 
@@ -125,9 +128,10 @@ class FuzzyTrafficController:
         Returns:
             Traffic level: 'low', 'medium', or 'high'
         """
-        if vehicle_count <= 5:
+        # Make thresholds lower for demo so green appears with fewer vehicles
+        if vehicle_count <= 2:
             return 'low'
-        elif vehicle_count <= 15:
+        elif vehicle_count <= 8:
             return 'medium'
         else:
             return 'high'
@@ -163,6 +167,7 @@ class FuzzyTrafficController:
 class TrafficSignal:
     """
     Traffic signal state machine with timing control.
+    Auto-advances based on elapsed time.
     """
     
     STATES = ['red', 'yellow', 'green']
@@ -175,8 +180,10 @@ class TrafficSignal:
         self.yellow_duration = 3
         self.red_duration = 30
         self.controller = FuzzyTrafficController()
-        self.last_update = None
+        self.last_update = time.time()
+        self.last_tick_time = time.time()
         self.vehicle_count = 0
+        self.auto_tick_enabled = True
     
     def update_timing(self, vehicle_count: int):
         """Update signal timing based on vehicle count."""
@@ -208,6 +215,26 @@ class TrafficSignal:
         import time
         self.last_update = time.time()
     
+    def auto_tick(self) -> bool:
+        """
+        Automatically advance signal based on actual elapsed time.
+        Call this periodically to keep signal synchronized with real time.
+        
+        Returns:
+            True if state changed, False otherwise
+        """
+        if not self.auto_tick_enabled:
+            return False
+        
+        current_time = time.time()
+        elapsed = int(current_time - self.last_tick_time)
+        
+        if elapsed >= 1:
+            self.last_tick_time = current_time
+            return self.tick(elapsed)
+        
+        return False
+    
     def tick(self, elapsed_seconds: int = 1) -> bool:
         """
         Advance the signal timer.
@@ -233,11 +260,14 @@ class TrafficSignal:
         return False
     
     def get_status(self) -> dict:
-        """Get current signal status."""
+        """Get current signal status with auto-tick update."""
+        # Auto-advance based on elapsed time
+        self.auto_tick()
+        
         return {
             "signal_id": self.signal_id,
             "state": self.state,
-            "remaining_time": self.remaining_time,
+            "remaining_time": max(0, self.remaining_time),  # Never show negative
             "green_duration": self.green_duration,
             "yellow_duration": self.yellow_duration,
             "red_duration": self.red_duration,

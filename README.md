@@ -13,8 +13,8 @@ An AI-powered system designed to reduce traffic congestion and improve road safe
 - **🚗 Vehicle Detection & Tracking** - YOLOv8n with object persistence across frames
 - **🔍 License Plate Detection** - Custom-trained YOLOv8 model (best_plate.pt) on 281 Sri Lankan plate images
 - **📝 OCR Integration** - EasyOCR with preprocessing pipeline, geometric filtering, and regex validation for Sri Lankan plates
-- **🅿️ Parking Zone Monitoring** - Configurable no-parking zones with warning (5s) and violation (15s) detection
-- **⚡ Speeding Detection** - Real-time speed estimation with 80 km/h threshold alerts
+- **🅿️ Parking Zone Monitoring** - Configurable no-parking zones with warning (3s) and violation (8s) detection (demo sensitivity)
+- **⚡ Speeding Detection** - Real-time speed estimation (demo threshold: 60 km/h / ~120 px/s) - alerts and penalties
 - **📊 Driver Scoring System** - 100-point scoring with violation tracking and dynamic fines
 - **🚦 Fuzzy Logic Traffic Controller** - Adaptive signal timing based on vehicle density
 - **🔊 Voice Warnings (TTS)** - edge-tts + pyttsx3 fallback for audio alerts
