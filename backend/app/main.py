@@ -19,6 +19,10 @@ from app.routers import video_router, parking_router
 from app.routers.scoring import router as scoring_router
 from app.routers.signal import router as signal_router
 from app.routers.junction import router as junction_router
+from app.routers.auth import router as auth_router
+from app.routers.driver import router as driver_router
+from app.routers.admin import router as admin_router
+from app.routers.community import router as community_router
 from app.db.database import init_db
 
 settings = get_settings()
@@ -78,6 +82,10 @@ app.include_router(parking_router)
 app.include_router(scoring_router)
 app.include_router(signal_router)
 app.include_router(junction_router)  # Member 2 & 4: Junction Safety, Behavior, Risk
+app.include_router(auth_router)       # Authentication: JWT login/register
+app.include_router(driver_router)     # Driver mobile app endpoints
+app.include_router(admin_router)      # Admin dashboard endpoints
+app.include_router(community_router)  # Public community endpoints
 
 # --- Static Files (for simulation UI and videos) ---
 from pathlib import Path

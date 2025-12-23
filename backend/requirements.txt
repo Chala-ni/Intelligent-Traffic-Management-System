@@ -42,6 +42,10 @@ pyttsx3==2.98
 aiosqlite==0.20.0
 # Note: For production, consider PostgreSQL with asyncpg
 
+# --- Authentication ---
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
 # --- Utilities ---
 pydantic==2.10.3
 pydantic-settings==2.6.1

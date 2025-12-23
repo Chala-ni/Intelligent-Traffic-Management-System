@@ -34,11 +34,12 @@ WRONG_WAY_ANGLE_THRESHOLD = 120  # degrees from expected direction
 # Junction safety scoring
 INITIAL_SAFETY_SCORE = 100
 VIOLATION_PENALTIES = {
-    'lane_weaving': 15,
-    'wrong_way_driving': 40,
-    'speeding': 10,
-    'parking_violation': 5,
-    'running_red_light': 25,
+    'lane_weaving': 5,           # -5 points per incident
+    'wrong_way_driving': 20,     # -20 points per incident
+    'speeding': 8,               # -8 points per incident
+    'parking_violation': 10,     # -10 points per incident
+    'running_red_light': 25,     # -25 points per incident
+    'tailgating': 3,             # -3 points per incident
 }
 SCORE_DECAY_RATE = 0.1  # Score recovery per second
 MIN_SAFETY_SCORE = 0

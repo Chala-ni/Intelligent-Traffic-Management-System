@@ -9,6 +9,7 @@ import os
 import sys
 import asyncio
 import subprocess
+import traceback
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict
