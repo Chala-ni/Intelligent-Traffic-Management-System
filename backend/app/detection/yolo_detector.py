@@ -613,6 +613,9 @@ def check_parking_violation(
             status = "violation"
             
             if not entry.get("penalized", False):
+                # Get plate display - use detection plate, or stored plate, or fallback to vehicle ID
+                plate_display = det.plate_text or entry.get("plate") or f"Vehicle {track_id}"
+                
                 # APPLY PENALTY TO DATABASE
                 _apply_parking_penalty(
                     track_id=track_id,
@@ -623,7 +626,6 @@ def check_parking_violation(
                 penalized_vehicles[track_id] = current_time
                 
                 # TTS Violation announcement
-                plate_display = det.plate_text or f"Vehicle {track_id}"
                 speak_warning(
                     f"Violation recorded for {plate_display}. Fine has been issued.",
                     track_id
@@ -633,8 +635,8 @@ def check_parking_violation(
             status = "warning"
             
             if not entry.get("warned", False):
-                # TTS Warning
-                plate_display = det.plate_text or f"Vehicle {track_id}"
+                # TTS Warning - use plate text from detection or stored entry
+                plate_display = det.plate_text or entry.get("plate") or f"Vehicle {track_id}"
                 speak_warning(
                     f"{plate_display}, please move immediately. You are in a no parking zone.",
                     track_id

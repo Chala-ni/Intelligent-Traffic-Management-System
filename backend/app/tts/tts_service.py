@@ -1,6 +1,8 @@
 """
 Intelligent Traffic Management System - Text-to-Speech Service
 Uses edge-tts for natural voices with pyttsx3 as offline fallback.
+
+Fixed: Thread-safe TTS with queue-based processing to prevent concurrent access issues.
 """
 
 import os
@@ -12,10 +14,17 @@ from datetime import datetime
 from typing import Optional, Dict
 import threading
 import hashlib
+import queue
+import time
 
 # Determine paths
 TTS_DIR = Path(__file__).parent
 WARNINGS_DIR = TTS_DIR / "warnings"
+
+# TTS Request Queue for thread-safe processing
+_tts_queue: queue.Queue = queue.Queue()
+_tts_worker_started = False
+_tts_lock = threading.Lock()
 
 # Pre-cached common warning messages (text -> filename)
 COMMON_WARNINGS: Dict[str, str] = {
@@ -46,7 +55,9 @@ class TTSService:
         self._edge_tts_available = self._check_edge_tts()
         self._pyttsx3_available = self._check_pyttsx3()
         self._pyttsx3_engine = None
+        self._pyttsx3_lock = threading.Lock()  # Lock for pyttsx3 engine access
         self._warning_cache: Dict[str, Path] = {}  # text_hash -> filepath
+        self._last_play_time = 0  # Track last audio play time
         
         print(f"🔊 TTS Service initialized")
         print(f"   Voice: {self.voice}")
@@ -54,8 +65,115 @@ class TTSService:
         print(f"   edge-tts: {self._edge_tts_available}")
         print(f"   pyttsx3: {self._pyttsx3_available}")
         
+        # Start the TTS worker thread
+        self._start_tts_worker()
+        
         # Pre-load cached warning files
         self._preload_common_warnings()
+    
+    def _start_tts_worker(self):
+        """Start the background TTS worker thread (singleton pattern)."""
+        global _tts_worker_started
+        
+        with _tts_lock:
+            if _tts_worker_started:
+                return
+            _tts_worker_started = True
+        
+        def _worker():
+            """Process TTS requests from the queue sequentially."""
+            # Create a dedicated pyttsx3 engine for this thread
+            pyttsx3_engine = None
+            if self._pyttsx3_available:
+                try:
+                    import pyttsx3
+                    pyttsx3_engine = pyttsx3.init()
+                    pyttsx3_engine.setProperty('rate', 150)
+                    pyttsx3_engine.setProperty('volume', 0.9)
+                except Exception as e:
+                    print(f"[TTS Worker] Could not init pyttsx3: {e}")
+            
+            while True:
+                try:
+                    # Block waiting for next request (with timeout for graceful exit)
+                    request = _tts_queue.get(timeout=60)
+                    
+                    if request is None:  # Shutdown signal
+                        break
+                    
+                    text, filename, play_immediately, service_ref = request
+                    
+                    filepath = None
+                    
+                    # Try edge-tts first (in a new event loop for this thread)
+                    if service_ref._edge_tts_available:
+                        try:
+                            loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(loop)
+                            try:
+                                filepath = loop.run_until_complete(
+                                    service_ref.generate_warning_async(text, filename)
+                                )
+                            finally:
+                                loop.close()
+                        except Exception as e:
+                            print(f"[TTS Worker] edge-tts failed: {e}")
+                    
+                    # Fallback to pyttsx3 (using dedicated engine)
+                    if filepath is None and pyttsx3_engine is not None:
+                        try:
+                            if filename is None:
+                                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                                filename = f"warning_{timestamp}"
+                            
+                            if not filename.endswith(".mp3"):
+                                filename = f"{filename}.mp3"
+                            
+                            filepath_obj = WARNINGS_DIR / filename
+                            
+                            pyttsx3_engine.save_to_file(text, str(filepath_obj))
+                            pyttsx3_engine.runAndWait()
+                            
+                            if filepath_obj.exists() and filepath_obj.stat().st_size > 0:
+                                print(f"[TTS Worker] ✅ Generated (pyttsx3): {filepath_obj.name}")
+                                filepath = filepath_obj
+                        except Exception as e:
+                            print(f"[TTS Worker] pyttsx3 failed: {e}")
+                            # Reinitialize engine if it crashed
+                            try:
+                                import pyttsx3
+                                pyttsx3_engine = pyttsx3.init()
+                                pyttsx3_engine.setProperty('rate', 150)
+                                pyttsx3_engine.setProperty('volume', 0.9)
+                            except:
+                                pass
+                    
+                    # Play the audio (with minimum delay between plays)
+                    if filepath and play_immediately:
+                        current_time = time.time()
+                        time_since_last = current_time - service_ref._last_play_time
+                        
+                        # Wait at least 4 seconds between audio plays to allow playback to finish
+                        min_audio_gap = 4.0
+                        if time_since_last < min_audio_gap:
+                            time.sleep(min_audio_gap - time_since_last)
+                        
+                        service_ref.play_audio(filepath)
+                        service_ref._last_play_time = time.time()
+                        
+                        # Wait for audio to finish playing (estimate ~3 seconds per message)
+                        time.sleep(3.0)
+                    
+                    _tts_queue.task_done()
+                    
+                except queue.Empty:
+                    continue  # Timeout, just loop again
+                except Exception as e:
+                    print(f"[TTS Worker] Error: {e}")
+        
+        worker_thread = threading.Thread(target=_worker, daemon=True, name="TTSWorker")
+        worker_thread.start()
+        print("   🧵 TTS Worker thread started")
     
     def _preload_common_warnings(self):
         """Load existing warning files into cache for instant playback."""
@@ -214,9 +332,10 @@ class TTSService:
         play_immediately: bool = True
     ) -> Optional[Path]:
         """
-        Generate a warning audio file (NON-BLOCKING).
+        Generate a warning audio file (NON-BLOCKING, QUEUE-BASED).
         
-        Runs TTS generation in a background thread to avoid blocking the event loop.
+        Adds the TTS request to a queue processed by a dedicated worker thread.
+        This ensures sequential processing and prevents thread-safety issues.
         
         Args:
             text: The text to convert to speech
@@ -224,41 +343,16 @@ class TTSService:
             play_immediately: Whether to play the audio after generation
         
         Returns:
-            None (runs async in background)
+            None (runs async via queue)
         """
-        def _background_generate():
-            """Run TTS generation in background thread."""
-            try:
-                filepath = None
-                
-                # Try edge-tts first
-                if self._edge_tts_available:
-                    try:
-                        # Create new event loop for this thread
-                        filepath = asyncio.run(self.generate_warning_async(text, filename))
-                    except Exception as e:
-                        print(f"[TTS] edge-tts failed: {e}")
-                
-                # Fallback to pyttsx3
-                if filepath is None and self._pyttsx3_available:
-                    filepath = self._generate_with_pyttsx3(text, filename)
-                
-                # Play the audio
-                if filepath and play_immediately:
-                    self.play_audio(filepath)
-                elif filepath is None and self._pyttsx3_available and play_immediately:
-                    # Direct speech without file
-                    self._speak_pyttsx3_direct(text)
-                    
-            except Exception as e:
-                print(f"[TTS] Background generation error: {e}")
+        # Add request to the TTS queue (non-blocking)
+        try:
+            _tts_queue.put_nowait((text, filename, play_immediately, self))
+            print(f"[TTS] 🎤 Queued: {text[:50]}...")
+        except queue.Full:
+            print(f"[TTS] ⚠️ Queue full, dropping: {text[:30]}...")
         
-        # Run in background thread (non-blocking)
-        thread = threading.Thread(target=_background_generate, daemon=True)
-        thread.start()
-        print(f"[TTS] 🎤 Generating: {text[:50]}...")
-        
-        return None  # Returns immediately, audio plays in background
+        return None  # Returns immediately, audio processed by worker
     
     def _generate_with_pyttsx3(self, text: str, filename: Optional[str] = None) -> Optional[Path]:
         """Generate audio file using pyttsx3."""
@@ -310,7 +404,7 @@ class TTSService:
         Play an audio file in the background.
         
         Platform-specific implementation:
-        - Windows: Uses 'start /min' for background playback
+        - Windows: Uses PowerShell MediaPlayer (auto-closes after playback)
         - macOS: Uses 'afplay'
         - Linux: Uses 'mpg123'
         
@@ -328,11 +422,22 @@ class TTSService:
             filepath_str = str(filepath.absolute())
             
             if sys.platform == "win32":
-                # Windows: Play in background using subprocess (non-blocking)
-                # Use CREATE_NO_WINDOW flag to prevent console popup
+                # Windows: Use PowerShell MediaPlayer which plays and exits cleanly
+                # This avoids the media player window staying open
+                ps_script = f'''
+                Add-Type -AssemblyName presentationCore
+                $player = New-Object System.Windows.Media.MediaPlayer
+                $player.Open([uri]"{filepath_str}")
+                $player.Play()
+                Start-Sleep -Milliseconds 100
+                while ($player.Position -lt $player.NaturalDuration.TimeSpan) {{
+                    Start-Sleep -Milliseconds 200
+                }}
+                $player.Close()
+                '''
                 CREATE_NO_WINDOW = 0x08000000
                 subprocess.Popen(
-                    ['cmd', '/c', 'start', '/min', '', filepath_str],
+                    ['powershell', '-WindowStyle', 'Hidden', '-Command', ps_script],
                     creationflags=CREATE_NO_WINDOW,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL
