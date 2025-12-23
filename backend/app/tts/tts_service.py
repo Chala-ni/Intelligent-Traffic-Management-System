@@ -82,16 +82,23 @@ class TTSService:
         
         def _worker():
             """Process TTS requests from the queue sequentially."""
-            # Create a dedicated pyttsx3 engine for this thread
-            pyttsx3_engine = None
-            if self._pyttsx3_available:
+            
+            def _speak_with_pyttsx3(text_to_speak):
+                """Speak text using a FRESH pyttsx3 engine each time (fixes Windows SAPI5 hanging)."""
                 try:
                     import pyttsx3
-                    pyttsx3_engine = pyttsx3.init()
-                    pyttsx3_engine.setProperty('rate', 150)
-                    pyttsx3_engine.setProperty('volume', 0.9)
+                    # Create a NEW engine for each message - this prevents SAPI5 from hanging
+                    engine = pyttsx3.init()
+                    engine.setProperty('rate', 150)
+                    engine.setProperty('volume', 0.9)
+                    engine.say(text_to_speak)
+                    engine.runAndWait()
+                    engine.stop()  # Explicitly stop
+                    del engine  # Clean up
+                    return True
                 except Exception as e:
-                    print(f"[TTS Worker] Could not init pyttsx3: {e}")
+                    print(f"[TTS Worker] pyttsx3 speak failed: {e}")
+                    return False
             
             while True:
                 try:
@@ -103,10 +110,11 @@ class TTSService:
                     
                     text, filename, play_immediately, service_ref = request
                     
+                    spoken = False
                     filepath = None
                     
                     # Try edge-tts first (in a new event loop for this thread)
-                    if service_ref._edge_tts_available:
+                    if service_ref._edge_tts_available and play_immediately:
                         try:
                             loop = asyncio.new_event_loop()
                             asyncio.set_event_loop(loop)
@@ -114,55 +122,23 @@ class TTSService:
                                 filepath = loop.run_until_complete(
                                     service_ref.generate_warning_async(text, filename)
                                 )
+                                if filepath and filepath.exists():
+                                    # Play the edge-tts generated file
+                                    service_ref.play_audio(filepath)
+                                    spoken = True
+                                    time.sleep(3.0)  # Wait for audio to finish
                             finally:
                                 loop.close()
                         except Exception as e:
                             print(f"[TTS Worker] edge-tts failed: {e}")
                     
-                    # Fallback to pyttsx3 (using dedicated engine)
-                    if filepath is None and pyttsx3_engine is not None:
-                        try:
-                            if filename is None:
-                                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-                                filename = f"warning_{timestamp}"
-                            
-                            if not filename.endswith(".mp3"):
-                                filename = f"{filename}.mp3"
-                            
-                            filepath_obj = WARNINGS_DIR / filename
-                            
-                            pyttsx3_engine.save_to_file(text, str(filepath_obj))
-                            pyttsx3_engine.runAndWait()
-                            
-                            if filepath_obj.exists() and filepath_obj.stat().st_size > 0:
-                                print(f"[TTS Worker] ✅ Generated (pyttsx3): {filepath_obj.name}")
-                                filepath = filepath_obj
-                        except Exception as e:
-                            print(f"[TTS Worker] pyttsx3 failed: {e}")
-                            # Reinitialize engine if it crashed
-                            try:
-                                import pyttsx3
-                                pyttsx3_engine = pyttsx3.init()
-                                pyttsx3_engine.setProperty('rate', 150)
-                                pyttsx3_engine.setProperty('volume', 0.9)
-                            except:
-                                pass
-                    
-                    # Play the audio (with minimum delay between plays)
-                    if filepath and play_immediately:
-                        current_time = time.time()
-                        time_since_last = current_time - service_ref._last_play_time
-                        
-                        # Wait at least 4 seconds between audio plays to allow playback to finish
-                        min_audio_gap = 4.0
-                        if time_since_last < min_audio_gap:
-                            time.sleep(min_audio_gap - time_since_last)
-                        
-                        service_ref.play_audio(filepath)
-                        service_ref._last_play_time = time.time()
-                        
-                        # Wait for audio to finish playing (estimate ~3 seconds per message)
-                        time.sleep(3.0)
+                    # Fallback to pyttsx3 direct speech
+                    if not spoken and play_immediately and service_ref._pyttsx3_available:
+                        print(f"[TTS Worker] 🔊 Speaking: {text[:45]}...")
+                        if _speak_with_pyttsx3(text):
+                            print(f"[TTS Worker] ✅ Spoke successfully")
+                            spoken = True
+                            service_ref._last_play_time = time.time()
                     
                     _tts_queue.task_done()
                     
@@ -170,6 +146,8 @@ class TTSService:
                     continue  # Timeout, just loop again
                 except Exception as e:
                     print(f"[TTS Worker] Error: {e}")
+                    import traceback
+                    traceback.print_exc()
         
         worker_thread = threading.Thread(target=_worker, daemon=True, name="TTSWorker")
         worker_thread.start()
@@ -180,14 +158,17 @@ class TTSService:
         if not WARNINGS_DIR.exists():
             return
         
-        # Look for common warning files
+        # Look for common warning files (support multiple formats for cross-platform)
+        audio_extensions = ['.mp3', '.aiff', '.wav']
         for warning_key, text in COMMON_WARNINGS.items():
-            filepath = WARNINGS_DIR / f"{warning_key}.mp3"
-            if filepath.exists():
-                text_hash = self._hash_text(text)
-                self._warning_cache[text_hash] = filepath
-                self._warning_cache[warning_key] = filepath
-                print(f"   📦 Cached: {warning_key}.mp3")
+            for ext in audio_extensions:
+                filepath = WARNINGS_DIR / f"{warning_key}{ext}"
+                if filepath.exists():
+                    text_hash = self._hash_text(text)
+                    self._warning_cache[text_hash] = filepath
+                    self._warning_cache[warning_key] = filepath
+                    print(f"   📦 Cached: {filepath.name}")
+                    break  # Use first found format
     
     def _hash_text(self, text: str) -> str:
         """Generate a hash for caching text-based lookups."""
@@ -208,22 +189,25 @@ class TTSService:
         if warning_key in self._warning_cache:
             return self.play_audio(self._warning_cache[warning_key])
         
-        # Try to find the file directly
-        filepath = WARNINGS_DIR / f"{warning_key}.mp3"
-        if filepath.exists():
-            self._warning_cache[warning_key] = filepath
-            return self.play_audio(filepath)
+        # Try to find the file with various extensions (cross-platform support)
+        audio_extensions = ['.mp3', '.aiff', '.wav']
+        for ext in audio_extensions:
+            filepath = WARNINGS_DIR / f"{warning_key}{ext}"
+            if filepath.exists():
+                self._warning_cache[warning_key] = filepath
+                return self.play_audio(filepath)
         
-        # Try alternative names
-        alt_names = [
-            f"{warning_key}_test.mp3",
-            f"warning_{warning_key}.mp3",
+        # Try alternative naming patterns
+        alt_patterns = [
+            f"{warning_key}_test",
+            f"warning_{warning_key}",
         ]
-        for alt in alt_names:
-            alt_path = WARNINGS_DIR / alt
-            if alt_path.exists():
-                self._warning_cache[warning_key] = alt_path
-                return self.play_audio(alt_path)
+        for pattern in alt_patterns:
+            for ext in audio_extensions:
+                alt_path = WARNINGS_DIR / f"{pattern}{ext}"
+                if alt_path.exists():
+                    self._warning_cache[warning_key] = alt_path
+                    return self.play_audio(alt_path)
         
         print(f"[TTS] ⚠️ No cached audio for: {warning_key}")
         return False
@@ -231,9 +215,11 @@ class TTSService:
     def play_any_warning(self) -> bool:
         """Play any available warning file (for testing)."""
         if WARNINGS_DIR.exists():
-            files = list(WARNINGS_DIR.glob("*.mp3"))
-            if files:
-                return self.play_audio(files[0])
+            # Search for any audio file (cross-platform)
+            for ext in ['*.mp3', '*.aiff', '*.wav']:
+                files = list(WARNINGS_DIR.glob(ext))
+                if files:
+                    return self.play_audio(files[0])
         return False
     
     def _ensure_directories(self):
@@ -355,7 +341,7 @@ class TTSService:
         return None  # Returns immediately, audio processed by worker
     
     def _generate_with_pyttsx3(self, text: str, filename: Optional[str] = None) -> Optional[Path]:
-        """Generate audio file using pyttsx3."""
+        """Generate audio file using pyttsx3 (cross-platform)."""
         try:
             engine = self._get_pyttsx3_engine()
             if engine is None:
@@ -365,7 +351,15 @@ class TTSService:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
                 filename = f"warning_{timestamp}"
             
-            if not filename.endswith(".mp3"):
+            # Remove any existing extension
+            if filename.endswith(('.mp3', '.wav', '.aiff')):
+                filename = filename.rsplit('.', 1)[0]
+            
+            # Use platform-appropriate extension
+            # macOS pyttsx3 saves to AIFF, Windows to MP3
+            if sys.platform == "darwin":
+                filename = f"{filename}.aiff"
+            else:
                 filename = f"{filename}.mp3"
             
             filepath = WARNINGS_DIR / filename
@@ -405,8 +399,8 @@ class TTSService:
         
         Platform-specific implementation:
         - Windows: Uses PowerShell MediaPlayer (auto-closes after playback)
-        - macOS: Uses 'afplay'
-        - Linux: Uses 'mpg123'
+        - macOS: Uses 'afplay' (built-in, supports MP3/WAV/etc.)
+        - Linux: Uses 'mpg123' or 'aplay'
         
         Args:
             filepath: Path to the audio file
@@ -443,19 +437,37 @@ class TTSService:
                     stderr=subprocess.DEVNULL
                 )
             elif sys.platform == "darwin":
-                # macOS: Use afplay in background
+                # macOS: Use afplay (built-in macOS audio player)
+                # afplay supports MP3, WAV, AAC, AIFF, etc.
+                # It blocks until playback finishes, which is fine in our worker thread
                 subprocess.Popen(
                     ['afplay', filepath_str],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL
                 )
             else:
-                # Linux: Use mpg123 in quiet mode, background
-                subprocess.Popen(
-                    ['mpg123', '-q', filepath_str],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
-                )
+                # Linux: Try multiple players in order of preference
+                players = [
+                    ['mpg123', '-q', filepath_str],  # For MP3
+                    ['aplay', filepath_str],          # For WAV
+                    ['ffplay', '-nodisp', '-autoexit', filepath_str],  # FFmpeg player
+                ]
+                played = False
+                for player_cmd in players:
+                    try:
+                        subprocess.Popen(
+                            player_cmd,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL
+                        )
+                        played = True
+                        break
+                    except FileNotFoundError:
+                        continue
+                
+                if not played:
+                    print(f"[TTS] ⚠️ No audio player found on Linux. Install mpg123, aplay, or ffplay.")
+                    return False
             
             print(f"[TTS] 🔊 Playing: {filepath.name}")
             return True
