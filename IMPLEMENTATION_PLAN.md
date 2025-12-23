@@ -328,6 +328,7 @@ Since we only have **one video feed**, we implement a **Hybrid 4-Way Controller*
 | **South** | SIMULATED | Random density, updates every 10 seconds |
 | **East** | SIMULATED | Random density, updates every 10 seconds |
 | **West** | SIMULATED | Random density, updates every 10 seconds |
+ show the 4 traffic lights seperatedly for simple identification
 
 ```python
 # 4-WAY HYBRID JUNCTION CONTROLLER

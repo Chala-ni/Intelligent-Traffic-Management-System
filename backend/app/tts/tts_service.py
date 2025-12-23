@@ -24,6 +24,7 @@ WARNINGS_DIR = TTS_DIR / "warnings"
 # TTS Request Queue for thread-safe processing
 _tts_queue: queue.Queue = queue.Queue()
 _tts_worker_started = False
+_tts_worker_stop = False  # Flag to signal worker to stop
 _tts_lock = threading.Lock()
 
 # Pre-cached common warning messages (text -> filename)
@@ -82,6 +83,7 @@ class TTSService:
         
         def _worker():
             """Process TTS requests from the queue sequentially."""
+            global _tts_worker_stop
             
             def _speak_with_pyttsx3(text_to_speak):
                 """Speak text using a FRESH pyttsx3 engine each time (fixes Windows SAPI5 hanging)."""
@@ -100,10 +102,13 @@ class TTSService:
                     print(f"[TTS Worker] pyttsx3 speak failed: {e}")
                     return False
             
-            while True:
+            while not _tts_worker_stop:
                 try:
-                    # Block waiting for next request (with timeout for graceful exit)
-                    request = _tts_queue.get(timeout=60)
+                    # Short timeout for responsive shutdown
+                    try:
+                        request = _tts_queue.get(timeout=1)
+                    except queue.Empty:
+                        continue
                     
                     if request is None:  # Shutdown signal
                         break
@@ -129,8 +134,8 @@ class TTSService:
                                     time.sleep(3.0)  # Wait for audio to finish
                             finally:
                                 loop.close()
-                        except Exception as e:
-                            print(f"[TTS Worker] edge-tts failed: {e}")
+                        except Exception:
+                            pass  # Silently fail, will use pyttsx3
                     
                     # Fallback to pyttsx3 direct speech
                     if not spoken and play_immediately and service_ref._pyttsx3_available:
@@ -142,11 +147,8 @@ class TTSService:
                     
                     _tts_queue.task_done()
                     
-                except queue.Empty:
-                    continue  # Timeout, just loop again
                 except Exception as e:
                     print(f"[TTS Worker] Error: {e}")
-                    import traceback
                     traceback.print_exc()
         
         worker_thread = threading.Thread(target=_worker, daemon=True, name="TTSWorker")
@@ -308,7 +310,7 @@ class TTSService:
                 return None
             
         except Exception as e:
-            print(f"[TTS] ❌ Error generating audio: {e}")
+            # Silently fail - pyttsx3 fallback will handle it
             return None
     
     def generate_warning(
@@ -494,6 +496,35 @@ class TTSService:
         if WARNINGS_DIR.exists():
             return len(list(WARNINGS_DIR.glob("*.mp3")))
         return 0
+    
+    def cleanup_all_warnings(self):
+        """
+        Remove ALL generated warning files (called on shutdown).
+        Also signals TTS worker to stop.
+        """
+        global _tts_worker_stop
+        
+        # Signal worker to stop
+        _tts_worker_stop = True
+        try:
+            _tts_queue.put_nowait(None)  # Send shutdown signal
+        except:
+            pass
+        
+        if not WARNINGS_DIR.exists():
+            return
+        
+        count = 0
+        for ext in ['*.mp3', '*.aiff', '*.wav']:
+            for f in WARNINGS_DIR.glob(ext):
+                try:
+                    f.unlink()
+                    count += 1
+                except:
+                    pass
+        
+        if count > 0:
+            print(f"[TTS] 🧹 Cleaned up {count} audio files")
     
     def cleanup_old_warnings(self, max_files: int = 100):
         """

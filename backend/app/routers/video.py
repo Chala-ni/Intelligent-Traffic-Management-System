@@ -72,7 +72,7 @@ async def generate_mjpeg_frames(
     frame_skip: int = None,
     confidence: float = None,
     show_detections: bool = True,
-    max_fps: float = 15.0,
+    max_fps: float = 30.0,  # Increased for smoother playback
     detect_plates_flag: bool = False,
 ):
     """
@@ -97,8 +97,9 @@ async def generate_mjpeg_frames(
     confidence = confidence or settings.detection_confidence
     min_frame_time = 1.0 / max_fps
     
-    # Open video
+    # Open video with optimized buffering
     cap = cv2.VideoCapture(video_path)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 3)  # Reduce buffer for smoother playback
     if not cap.isOpened():
         print(f"[STREAM] ❌ Cannot open video: {video_path}")
         raise HTTPException(status_code=404, detail=f"Cannot open video: {video_path}")
@@ -191,10 +192,10 @@ async def generate_mjpeg_frames(
             
             frame_idx += 1
             
-            # Throttle to max FPS
+            # Minimal throttle for smoother playback
             elapsed = time.time() - frame_start
             if elapsed < min_frame_time:
-                await asyncio.sleep(min_frame_time - elapsed)
+                await asyncio.sleep(max(0.001, min_frame_time - elapsed))
                 
     finally:
         print(f"[STREAM] 🛑 Stream stopped. Processed {_pipeline_state['frames_processed']} frames, {_pipeline_state['total_detections']} detections")

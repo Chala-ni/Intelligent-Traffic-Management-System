@@ -45,6 +45,14 @@ async def lifespan(app: FastAPI):
     yield
     # Shutdown
     print("🛑 Shutting down...")
+    # Clean up TTS audio files
+    try:
+        from app.tts import get_tts_service
+        tts = get_tts_service()
+        if tts:
+            tts.cleanup_all_warnings()
+    except:
+        pass
 
 
 # --- FastAPI App ---
