@@ -244,6 +244,8 @@ _ocr_service = None
 _scoring_engine = None
 _traffic_controller = None
 _tts_service = None
+_lane_weaving_service = None
+_behavior_service = None
 
 
 def get_ocr_service():
@@ -258,6 +260,34 @@ def get_ocr_service():
             print(f"⚠️ OCR service not available: {e}")
             _ocr_service = lambda x: None
     return _ocr_service
+
+
+def get_lane_weaving_service():
+    """Lazy load lane weaving detection service (Member 2)."""
+    global _lane_weaving_service
+    if _lane_weaving_service is None:
+        try:
+            from app.services import lane_weaving_service
+            _lane_weaving_service = lane_weaving_service
+            print("✅ Lane weaving service loaded (Member 2)")
+        except ImportError as e:
+            print(f"⚠️ Lane weaving service not available: {e}")
+            _lane_weaving_service = None
+    return _lane_weaving_service
+
+
+def get_behavior_service():
+    """Lazy load abnormal behavior detection service (Member 4)."""
+    global _behavior_service
+    if _behavior_service is None:
+        try:
+            from app.services import behavior_service
+            _behavior_service = behavior_service
+            print("✅ Behavior detection service loaded (Member 4)")
+        except ImportError as e:
+            print(f"⚠️ Behavior service not available: {e}")
+            _behavior_service = None
+    return _behavior_service
 
 
 def get_scoring_engine():
@@ -374,13 +404,12 @@ def get_tts_service():
 
 def speak_warning(message: str, track_id: int = None, warning_type: str = None):
     """
-    Play a voice warning using cached audio files (instant, non-blocking).
+    Generate and play a voice warning dynamically.
     
     Args:
-        message: The warning message (used for logging)
+        message: The actual warning message to speak
         track_id: Vehicle track ID (for cooldown tracking)
-        warning_type: Type of warning - 'parking_warning', 'parking_violation', 
-                     'speeding_warning'. If None, tries to detect from message.
+        warning_type: Type of warning (for logging only)
     
     Includes cooldown to prevent spam.
     """
@@ -398,29 +427,12 @@ def speak_warning(message: str, track_id: int = None, warning_type: str = None):
     # Log to console
     print(f"[AUDIO] 🔊 {message}")
     
-    # Detect warning type from message if not provided
-    if warning_type is None:
-        msg_lower = message.lower()
-        if "parking" in msg_lower and "violation" in msg_lower:
-            warning_type = "parking_violation"
-        elif "parking" in msg_lower:
-            warning_type = "parking_warning"
-        elif "speed" in msg_lower:
-            warning_type = "speeding_warning"
-        else:
-            warning_type = "parking_warning"  # Default
-    
-    # Try to use TTS service - play cached audio (instant, non-blocking)
+    # Try to use TTS service - ALWAYS generate dynamic messages
     tts = get_tts_service()
     if tts:
         try:
-            # Try cached playback first (instant, no generation)
-            played = tts.play_cached_warning(warning_type)
-            if not played:
-                # Fallback: play any available warning file
-                played = tts.play_any_warning()
-            if not played:
-                print(f"[TTS] No audio files available")
+            # Generate and play the ACTUAL message (not cached files)
+            tts.generate_warning(message, play_immediately=True)
         except Exception as e:
             print(f"[TTS] Error: {e}")
 
@@ -1007,6 +1019,10 @@ def detect_and_track(
     parking_warnings = 0
     parking_violations = 0
     
+    # Get member services
+    lane_service = get_lane_weaving_service()
+    behavior_svc = get_behavior_service()
+    
     for det in detections:
         # Add plate info
         if det.track_id in vehicle_plate_map:
@@ -1029,6 +1045,29 @@ def detect_and_track(
             parking_warnings += 1
         elif parking_status == "violation":
             parking_violations += 1
+        
+        # ===== MEMBER 2: Lane Weaving Detection =====
+        if lane_service:
+            try:
+                weaving_event = lane_service.detect_lane_weaving(
+                    det.track_id, det.centroid, det.plate_text
+                )
+                if weaving_event:
+                    print(f"[MEMBER2] Lane weaving: Vehicle {det.track_id}")
+            except Exception as e:
+                pass  # Non-critical feature
+        
+        # ===== MEMBER 4: Abnormal Behavior Detection =====
+        if behavior_svc:
+            try:
+                behavior_svc.analyze_vehicle_behavior(
+                    det.track_id,
+                    det.centroid,
+                    det.speed_pixels,
+                    det.plate_text
+                )
+            except Exception as e:
+                pass  # Non-critical feature
     
     # Signal automation (4-way junction with emergency detection)
     vehicle_count = len(detections)

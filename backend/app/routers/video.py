@@ -90,6 +90,9 @@ async def generate_mjpeg_frames(
         max_fps: Maximum output FPS (throttle for browser)
         detect_plates_flag: Whether to run plate detection on detected vehicles
     """
+    print(f"[STREAM] 🎬 Starting video stream: {video_path}")
+    print(f"[STREAM]    frame_skip={frame_skip}, detect_plates={detect_plates_flag}")
+    
     frame_skip = frame_skip or settings.frame_skip
     confidence = confidence or settings.detection_confidence
     min_frame_time = 1.0 / max_fps
@@ -97,6 +100,7 @@ async def generate_mjpeg_frames(
     # Open video
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
+        print(f"[STREAM] ❌ Cannot open video: {video_path}")
         raise HTTPException(status_code=404, detail=f"Cannot open video: {video_path}")
     
     # Load models using new two-stage API
@@ -112,11 +116,14 @@ async def generate_mjpeg_frames(
     video_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     
+    print(f"[STREAM] ✅ Video opened: {total_frames} frames @ {video_fps:.1f} fps")
+    
     _pipeline_state["running"] = True
     _pipeline_state["video_source"] = video_path
     _pipeline_state["start_time"] = time.time()
     
     frame_idx = 0
+    log_interval = 50  # Log every 50 frames
     
     try:
         while _pipeline_state["running"]:
@@ -147,6 +154,10 @@ async def generate_mjpeg_frames(
                     _pipeline_state["total_detections"] += len(result.detections)
                     _pipeline_state["plates_detected"] += len(result.plate_boxes)
                     _pipeline_state["last_frame_time"] = time.time()
+                    
+                    # Log progress periodically
+                    if frame_idx % log_interval == 0:
+                        print(f"[STREAM] Frame {frame_idx}: {len(result.detections)} vehicles, {len(result.plate_boxes)} plates")
                     
                     # Draw parking zones overlay (if available)
                     # Skip parking zones for now to avoid blocking
@@ -186,6 +197,7 @@ async def generate_mjpeg_frames(
                 await asyncio.sleep(min_frame_time - elapsed)
                 
     finally:
+        print(f"[STREAM] 🛑 Stream stopped. Processed {_pipeline_state['frames_processed']} frames, {_pipeline_state['total_detections']} detections")
         cap.release()
         reset_pipeline_state()
 

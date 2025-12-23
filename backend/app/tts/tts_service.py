@@ -214,9 +214,9 @@ class TTSService:
         play_immediately: bool = True
     ) -> Optional[Path]:
         """
-        Generate a warning audio file (sync wrapper).
+        Generate a warning audio file (NON-BLOCKING).
         
-        Tries edge-tts first, falls back to pyttsx3.
+        Runs TTS generation in a background thread to avoid blocking the event loop.
         
         Args:
             text: The text to convert to speech
@@ -224,42 +224,41 @@ class TTSService:
             play_immediately: Whether to play the audio after generation
         
         Returns:
-            Path to the generated MP3 file, or None if failed
+            None (runs async in background)
         """
-        filepath = None
-        
-        # Try edge-tts first
-        if self._edge_tts_available:
+        def _background_generate():
+            """Run TTS generation in background thread."""
             try:
-                # Check if we're already in an async event loop
-                try:
-                    loop = asyncio.get_running_loop()
-                    # We're in an async context - run in a new thread
-                    import concurrent.futures
-                    with concurrent.futures.ThreadPoolExecutor() as executor:
-                        future = executor.submit(
-                            lambda: asyncio.run(self.generate_warning_async(text, filename))
-                        )
-                        filepath = future.result(timeout=10)
-                except RuntimeError:
-                    # No event loop running - safe to use asyncio.run()
-                    filepath = asyncio.run(self.generate_warning_async(text, filename))
+                filepath = None
+                
+                # Try edge-tts first
+                if self._edge_tts_available:
+                    try:
+                        # Create new event loop for this thread
+                        filepath = asyncio.run(self.generate_warning_async(text, filename))
+                    except Exception as e:
+                        print(f"[TTS] edge-tts failed: {e}")
+                
+                # Fallback to pyttsx3
+                if filepath is None and self._pyttsx3_available:
+                    filepath = self._generate_with_pyttsx3(text, filename)
+                
+                # Play the audio
+                if filepath and play_immediately:
+                    self.play_audio(filepath)
+                elif filepath is None and self._pyttsx3_available and play_immediately:
+                    # Direct speech without file
+                    self._speak_pyttsx3_direct(text)
+                    
             except Exception as e:
-                print(f"[TTS] edge-tts failed: {e}")
+                print(f"[TTS] Background generation error: {e}")
         
-        # Fallback to pyttsx3
-        if filepath is None and self._pyttsx3_available:
-            filepath = self._generate_with_pyttsx3(text, filename)
+        # Run in background thread (non-blocking)
+        thread = threading.Thread(target=_background_generate, daemon=True)
+        thread.start()
+        print(f"[TTS] 🎤 Generating: {text[:50]}...")
         
-        # If still no file, just speak directly with pyttsx3 (no file)
-        if filepath is None and self._pyttsx3_available and play_immediately:
-            self._speak_pyttsx3_direct(text)
-            return None
-        
-        if filepath and play_immediately:
-            self.play_audio(filepath)
-        
-        return filepath
+        return None  # Returns immediately, audio plays in background
     
     def _generate_with_pyttsx3(self, text: str, filename: Optional[str] = None) -> Optional[Path]:
         """Generate audio file using pyttsx3."""

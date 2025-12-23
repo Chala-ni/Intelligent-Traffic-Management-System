@@ -9,7 +9,6 @@ Updated: Now supports 4-WAY HYBRID JUNCTION
 
 from typing import Optional
 from fastapi import APIRouter, Query
-from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from app.fuzzy.traffic_controller import (
@@ -229,21 +228,5 @@ async def fuzzy_status():
     }
 
 
-@router.get("/simulation", summary="Get simulation HTML page", response_class=HTMLResponse)
-async def get_simulation_page():
-    """
-    Redirect to the traffic light simulation page.
-    """
-    return """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Traffic Signal Simulation</title>
-        <meta http-equiv="refresh" content="0; url=/static/simulation.html">
-    </head>
-    <body>
-        <p>Redirecting to simulation...</p>
-        <a href="/static/simulation.html">Click here if not redirected</a>
-    </body>
-    </html>
-    """
+# NOTE: Removed /signal/simulation endpoint - use /simulation in main.py instead
+# This avoids redundancy with /simulation and /static/simulation.html

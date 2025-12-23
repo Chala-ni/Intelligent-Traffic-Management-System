@@ -18,6 +18,7 @@ from app.config import get_settings
 from app.routers import video_router, parking_router
 from app.routers.scoring import router as scoring_router
 from app.routers.signal import router as signal_router
+from app.routers.junction import router as junction_router
 from app.db.database import init_db
 
 settings = get_settings()
@@ -68,6 +69,7 @@ app.include_router(video_router)
 app.include_router(parking_router)
 app.include_router(scoring_router)
 app.include_router(signal_router)
+app.include_router(junction_router)  # Member 2 & 4: Junction Safety, Behavior, Risk
 
 # --- Static Files (for simulation UI and videos) ---
 from pathlib import Path
