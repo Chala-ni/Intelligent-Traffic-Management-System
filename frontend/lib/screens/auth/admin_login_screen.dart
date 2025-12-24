@@ -15,7 +15,7 @@ class AdminLoginScreen extends StatefulWidget {
 class _AdminLoginScreenState extends State<AdminLoginScreen>
     with TickerProviderStateMixin {
   final _formKey = GlobalKey<FormState>();
-  final _emailController = TextEditingController();
+  final _usernameController = TextEditingController();
   final _passwordController = TextEditingController();
   
   late AnimationController _bgController;
@@ -51,7 +51,7 @@ class _AdminLoginScreenState extends State<AdminLoginScreen>
   void dispose() {
     _bgController.dispose();
     _formController.dispose();
-    _emailController.dispose();
+    _usernameController.dispose();
     _passwordController.dispose();
     super.dispose();
   }
@@ -61,7 +61,7 @@ class _AdminLoginScreenState extends State<AdminLoginScreen>
     
     final authProvider = context.read<AuthProvider>();
     final success = await authProvider.adminLogin(
-      _emailController.text.trim(),
+      _usernameController.text.trim(),
       _passwordController.text,
     );
     
@@ -148,80 +148,82 @@ class _AdminLoginScreenState extends State<AdminLoginScreen>
   Widget _buildBrandingSection() {
     return Container(
       padding: const EdgeInsets.all(48),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Traffic light logo
-          _buildAnimatedTrafficLight(),
-          
-          const SizedBox(height: 48),
-          
-          // Title
-          ShaderMask(
-            shaderCallback: (bounds) => const LinearGradient(
-              colors: [AppColors.primary, AppColors.accent],
-            ).createShader(bounds),
-            child: Text(
-              'TRAFFIC CONTROL',
-              style: AppTypography.h1.copyWith(
-                fontSize: 48,
-                fontWeight: FontWeight.w900,
-                color: Colors.white,
-                letterSpacing: 4,
-              ),
-            ),
-          ),
-          
-          const SizedBox(height: 8),
-          
-          Text(
-            'COMMAND CENTER',
-            style: AppTypography.h2.copyWith(
-              color: AppColors.textSecondary,
-              letterSpacing: 8,
-            ),
-          ),
-          
-          const SizedBox(height: 24),
-          
-          Container(
-            width: 100,
-            height: 4,
-            decoration: BoxDecoration(
-              gradient: const LinearGradient(
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Traffic light logo
+            _buildAnimatedTrafficLight(),
+            
+            const SizedBox(height: 48),
+            
+            // Title
+            ShaderMask(
+              shaderCallback: (bounds) => const LinearGradient(
                 colors: [AppColors.primary, AppColors.accent],
+              ).createShader(bounds),
+              child: Text(
+                'TRAFFIC CONTROL',
+                style: AppTypography.h1.copyWith(
+                  fontSize: 48,
+                  fontWeight: FontWeight.w900,
+                  color: Colors.white,
+                  letterSpacing: 4,
+                ),
               ),
-              borderRadius: BorderRadius.circular(2),
             ),
-          ),
-          
-          const SizedBox(height: 24),
-          
-          SizedBox(
-            width: 400,
-            child: Text(
-              'Real-time traffic monitoring, violation detection, and intelligent signal control powered by AI.',
-              style: AppTypography.bodyLarge.copyWith(
+            
+            const SizedBox(height: 8),
+            
+            Text(
+              'COMMAND CENTER',
+              style: AppTypography.h2.copyWith(
                 color: AppColors.textSecondary,
-                height: 1.6,
+                letterSpacing: 8,
               ),
             ),
-          ),
-          
-          const SizedBox(height: 48),
-          
-          // Stats row
-          Row(
-            children: [
-              _buildStatItem('24/7', 'Monitoring'),
-              const SizedBox(width: 40),
-              _buildStatItem('99.9%', 'Uptime'),
-              const SizedBox(width: 40),
-              _buildStatItem('AI', 'Powered'),
-            ],
-          ),
-        ],
+            
+            const SizedBox(height: 24),
+            
+            Container(
+              width: 100,
+              height: 4,
+              decoration: BoxDecoration(
+                gradient: const LinearGradient(
+                  colors: [AppColors.primary, AppColors.accent],
+                ),
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            
+            const SizedBox(height: 24),
+            
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 400),
+              child: Text(
+                'Real-time traffic monitoring, violation detection, and intelligent signal control powered by AI.',
+                style: AppTypography.bodyLarge.copyWith(
+                  color: AppColors.textSecondary,
+                  height: 1.6,
+                ),
+              ),
+            ),
+            
+            const SizedBox(height: 48),
+            
+            // Stats row - use Wrap for responsiveness
+            Wrap(
+              spacing: 40,
+              runSpacing: 20,
+              children: [
+                _buildStatItem('24/7', 'Monitoring'),
+                _buildStatItem('99.9%', 'Uptime'),
+                _buildStatItem('AI', 'Powered'),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -415,20 +417,17 @@ class _AdminLoginScreenState extends State<AdminLoginScreen>
                   const SizedBox(height: 16),
                 ],
                 
-                // Email field
+                // Username field
                 AppTextField(
-                  label: 'Email',
-                  hint: 'admin@trafficcontrol.com',
-                  controller: _emailController,
-                  prefixIcon: Icons.email_outlined,
-                  keyboardType: TextInputType.emailAddress,
+                  label: 'Username',
+                  hint: 'admin',
+                  controller: _usernameController,
+                  prefixIcon: Icons.person_outline,
+                  keyboardType: TextInputType.text,
                   textInputAction: TextInputAction.next,
                   validator: (value) {
                     if (value == null || value.isEmpty) {
-                      return 'Please enter your email';
-                    }
-                    if (!value.contains('@')) {
-                      return 'Please enter a valid email';
+                      return 'Please enter your username';
                     }
                     return null;
                   },
