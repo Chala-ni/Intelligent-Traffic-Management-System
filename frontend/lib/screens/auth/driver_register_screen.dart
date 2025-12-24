@@ -17,6 +17,7 @@ class _DriverRegisterScreenState extends State<DriverRegisterScreen>
   final _formKey = GlobalKey<FormState>();
   final _nameController = TextEditingController();
   final _phoneController = TextEditingController();
+  final _passwordController = TextEditingController();
   final _plateController = TextEditingController();
   final _licenseController = TextEditingController();
   
@@ -53,6 +54,7 @@ class _DriverRegisterScreenState extends State<DriverRegisterScreen>
     _animController.dispose();
     _nameController.dispose();
     _phoneController.dispose();
+    _passwordController.dispose();
     _plateController.dispose();
     _licenseController.dispose();
     super.dispose();
@@ -66,7 +68,8 @@ class _DriverRegisterScreenState extends State<DriverRegisterScreen>
       name: _nameController.text.trim(),
       phone: _phoneController.text.trim(),
       plateNumber: _plateController.text.trim().toUpperCase(),
-      password: _licenseController.text.trim().toUpperCase(),
+      password: _passwordController.text,
+      licenseNumber: _licenseController.text.trim().toUpperCase(),
     );
     
     if (success && mounted) {
@@ -92,11 +95,13 @@ class _DriverRegisterScreenState extends State<DriverRegisterScreen>
                 ),
               ),
               const SizedBox(width: 12),
-              const Text('Registration Successful'),
+              const Expanded(
+                child: Text('Registration Successful'),
+              ),
             ],
           ),
           content: Text(
-            'Your account has been created successfully. You can now sign in with your phone number and license plate.',
+            'Your account has been created successfully. You can now sign in with your phone number and password.',
             style: AppTypography.bodyMedium.copyWith(
               color: AppColors.textSecondary,
             ),
@@ -119,10 +124,23 @@ class _DriverRegisterScreenState extends State<DriverRegisterScreen>
     if (_currentStep < 1) {
       // Validate current step
       if (_currentStep == 0) {
-        if (_nameController.text.isEmpty || _phoneController.text.isEmpty) {
+        if (_nameController.text.isEmpty || _phoneController.text.isEmpty || _passwordController.text.isEmpty) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: const Text('Please fill in all fields'),
+              backgroundColor: AppColors.error,
+              behavior: SnackBarBehavior.floating,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8),
+              ),
+            ),
+          );
+          return;
+        }
+        if (_passwordController.text.length < 6) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: const Text('Password must be at least 6 characters'),
               backgroundColor: AppColors.error,
               behavior: SnackBarBehavior.floating,
               shape: RoundedRectangleBorder(
@@ -415,9 +433,10 @@ class _DriverRegisterScreenState extends State<DriverRegisterScreen>
                             onPressed: _previousStep,
                             variant: AppButtonVariant.outlined,
                             icon: Icons.arrow_back,
+                            size: AppButtonSize.medium,
                           ),
                         ),
-                      if (_currentStep > 0) const SizedBox(width: 16),
+                      if (_currentStep > 0) const SizedBox(width: 12),
                       Expanded(
                         flex: _currentStep > 0 ? 1 : 1,
                         child: AppButton(
@@ -425,7 +444,7 @@ class _DriverRegisterScreenState extends State<DriverRegisterScreen>
                           onPressed: _currentStep == 1 ? _handleRegister : _nextStep,
                           isLoading: authProvider.isLoading,
                           icon: _currentStep == 1 ? Icons.check : Icons.arrow_forward,
-                          size: AppButtonSize.large,
+                          size: AppButtonSize.medium,
                         ),
                       ),
                     ],
@@ -465,13 +484,33 @@ class _DriverRegisterScreenState extends State<DriverRegisterScreen>
           controller: _phoneController,
           prefixIcon: Icons.phone_outlined,
           keyboardType: TextInputType.phone,
-          textInputAction: TextInputAction.done,
+          textInputAction: TextInputAction.next,
           validator: (value) {
             if (value == null || value.isEmpty) {
               return 'Please enter your phone number';
             }
             if (value.length < 10) {
               return 'Please enter a valid phone number';
+            }
+            return null;
+          },
+        ),
+        
+        const SizedBox(height: 20),
+        
+        AppTextField(
+          label: 'Password',
+          hint: '••••••••',
+          controller: _passwordController,
+          prefixIcon: Icons.lock_outline,
+          obscureText: true,
+          textInputAction: TextInputAction.done,
+          validator: (value) {
+            if (value == null || value.isEmpty) {
+              return 'Please enter a password';
+            }
+            if (value.length < 6) {
+              return 'Password must be at least 6 characters';
             }
             return null;
           },
@@ -486,7 +525,7 @@ class _DriverRegisterScreenState extends State<DriverRegisterScreen>
       children: [
         AppTextField(
           label: 'License Plate Number',
-          hint: 'ABC-1234',
+          hint: 'WP ABC 1234',
           controller: _plateController,
           prefixIcon: Icons.credit_card_outlined,
           textInputAction: TextInputAction.next,

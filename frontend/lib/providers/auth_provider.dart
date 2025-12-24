@@ -202,10 +202,33 @@ class AuthProvider with ChangeNotifier {
     required String password,
     required String plateNumber,
     String? name,
+    String? licenseNumber,
   }) async {
     _state = AuthState.loading;
     _error = null;
     notifyListeners();
+
+    // Frontend validation
+    if (phone.length < 10) {
+      _error = 'Phone number must be at least 10 characters';
+      _state = AuthState.error;
+      notifyListeners();
+      return false;
+    }
+    
+    if (password.length < 6) {
+      _error = 'Password must be at least 6 characters';
+      _state = AuthState.error;
+      notifyListeners();
+      return false;
+    }
+    
+    if (plateNumber.isEmpty) {
+      _error = 'License plate number is required';
+      _state = AuthState.error;
+      notifyListeners();
+      return false;
+    }
 
     try {
       final response = await _apiClient.post(
@@ -215,6 +238,7 @@ class AuthProvider with ChangeNotifier {
           'password': password,
           'plate_number': plateNumber,
           if (name != null) 'name': name,
+          if (licenseNumber != null) 'license_number': licenseNumber,
         },
         requiresAuth: false,
       );

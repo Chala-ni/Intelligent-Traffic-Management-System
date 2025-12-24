@@ -54,6 +54,19 @@ class DriverRegister(BaseModel):
     password: str
     plate_number: str
     name: Optional[str] = None
+    license_number: Optional[str] = None
+    
+    @classmethod
+    def validate_phone(cls, v):
+        if len(v) < 10:
+            raise ValueError('Phone number must be at least 10 characters')
+        return v
+    
+    @classmethod
+    def validate_password(cls, v):
+        if len(v) < 6:
+            raise ValueError('Password must be at least 6 characters')
+        return v
 
 
 class DriverLogin(BaseModel):
@@ -109,9 +122,11 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     """Create a JWT access token."""
     to_encode = data.copy()
     expire = datetime.utcnow() + (expires_delta or timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS))
-    to_encode.update({"exp": expire})
+    to_encode.update({"exp": expire.isoformat()})
     
     if jwt:
+        # python-jose handles datetime, but we pass isoformat for consistency
+        to_encode["exp"] = expire
         return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     else:
         # Fallback: simple base64 encoding (NOT SECURE - for demo only)
@@ -279,9 +294,9 @@ async def register_driver(data: DriverRegister):
         password_hash = hash_password(data.password)
         
         await db.execute(
-            """INSERT INTO driver_users (phone, password_hash, plate_number, name)
-               VALUES (?, ?, ?, ?)""",
-            (data.phone, password_hash, data.plate_number.upper(), data.name)
+            """INSERT INTO driver_users (phone, password_hash, plate_number, name, license_number)
+               VALUES (?, ?, ?, ?, ?)""",
+            (data.phone, password_hash, data.plate_number.upper(), data.name, data.license_number)
         )
         await db.commit()
         

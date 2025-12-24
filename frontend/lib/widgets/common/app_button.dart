@@ -103,15 +103,28 @@ class _AppButtonState extends State<AppButton> {
     if (widget.icon != null) {
       return Row(
         mainAxisSize: MainAxisSize.min,
+        mainAxisAlignment: MainAxisAlignment.center,
         children: [
           Icon(widget.icon, size: _getIconSize()),
           const SizedBox(width: 8),
-          Text(widget.text, style: _getTextStyle()),
+          Flexible(
+            child: Text(
+              widget.text,
+              style: _getTextStyle(),
+              overflow: TextOverflow.ellipsis,
+              maxLines: 1,
+            ),
+          ),
         ],
       );
     }
 
-    return Text(widget.text, style: _getTextStyle());
+    return Text(
+      widget.text, 
+      style: _getTextStyle(),
+      overflow: TextOverflow.ellipsis,
+      maxLines: 1,
+    );
   }
 
   double _getHeight() {

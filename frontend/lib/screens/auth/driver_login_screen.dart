@@ -16,7 +16,7 @@ class _DriverLoginScreenState extends State<DriverLoginScreen>
     with SingleTickerProviderStateMixin {
   final _formKey = GlobalKey<FormState>();
   final _phoneController = TextEditingController();
-  final _plateController = TextEditingController();
+  final _passwordController = TextEditingController();
   
   late AnimationController _animController;
   late Animation<double> _fadeAnimation;
@@ -48,7 +48,7 @@ class _DriverLoginScreenState extends State<DriverLoginScreen>
   void dispose() {
     _animController.dispose();
     _phoneController.dispose();
-    _plateController.dispose();
+    _passwordController.dispose();
     super.dispose();
   }
 
@@ -58,7 +58,7 @@ class _DriverLoginScreenState extends State<DriverLoginScreen>
     final authProvider = context.read<AuthProvider>();
     final success = await authProvider.driverLogin(
       _phoneController.text.trim(),
-      _plateController.text.trim().toUpperCase(),
+      _passwordController.text,
     );
     
     if (success && mounted) {
@@ -240,17 +240,21 @@ class _DriverLoginScreenState extends State<DriverLoginScreen>
                   
                   const SizedBox(height: 20),
                   
-                  // License plate field
+                  // Password field
                   AppTextField(
-                    label: 'License Plate',
-                    hint: 'ABC-1234',
-                    controller: _plateController,
-                    prefixIcon: Icons.credit_card_outlined,
+                    label: 'Password',
+                    hint: '••••••••',
+                    controller: _passwordController,
+                    prefixIcon: Icons.lock_outline,
+                    obscureText: true,
                     textInputAction: TextInputAction.done,
                     onSubmitted: (_) => _handleLogin(),
                     validator: (value) {
                       if (value == null || value.isEmpty) {
-                        return 'Please enter your license plate';
+                        return 'Please enter your password';
+                      }
+                      if (value.length < 6) {
+                        return 'Password must be at least 6 characters';
                       }
                       return null;
                     },

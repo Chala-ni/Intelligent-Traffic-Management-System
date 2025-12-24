@@ -8,7 +8,7 @@ import 'screens/screens.dart';
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(const TrafficControlApp());
-}C:\flutter\bin\flutter.bat run -d android
+}
 
 class TrafficControlApp extends StatelessWidget {
   const TrafficControlApp({super.key});
