@@ -78,10 +78,11 @@ class _TrafficLightPanelState extends State<TrafficLightPanel>
           _yellowRemaining = data['yellow_remaining'] ?? 0;
           _laneData = data['lanes'] ?? {};
           
-          // Determine current state based on lane data
-          final greenLaneData = _laneData[_currentGreenLane];
-          if (greenLaneData != null) {
-            final stateStr = greenLaneData['state'] ?? 'green';
+          // FIX: Main light ALWAYS shows NORTH lane state (the video feed)
+          // This ensures the main light matches what's visible in the video
+          final northLaneData = _laneData['north'];
+          if (northLaneData != null) {
+            final stateStr = northLaneData['state'] ?? 'red';
             if (stateStr == 'red') {
               _currentState = TrafficLightState.red;
             } else if (stateStr == 'yellow') {
@@ -94,6 +95,7 @@ class _TrafficLightPanelState extends State<TrafficLightPanel>
       }
     } catch (e) {
       // Keep last known state on error
+      debugPrint('[TrafficLight] Error fetching status: $e');
     }
   }
 
@@ -192,10 +194,11 @@ class _TrafficLightPanelState extends State<TrafficLightPanel>
           ],
         ),
         const SizedBox(height: 2),
+        // FIX: Always show NORTH lane status (matches the video feed)
         Text(
-          'Main: ${_currentGreenLane.toUpperCase()} GREEN',
+          'North Lane: ${_currentState.name.toUpperCase()}',
           style: AppTypography.caption.copyWith(
-            color: AppColors.success,
+            color: _getStateColor(),
             fontWeight: FontWeight.bold,
             fontSize: 10,
           ),
@@ -208,8 +211,9 @@ class _TrafficLightPanelState extends State<TrafficLightPanel>
     return Center(
       child: Column(
         children: [
+          // FIX: Main light is always NORTH - the video feed lane
           Text(
-            'Junction A (Live)',
+            'North Lane (Video Feed)',
             style: AppTypography.caption.copyWith(
               color: AppColors.primary,
               fontWeight: FontWeight.bold,

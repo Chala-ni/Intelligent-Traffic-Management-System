@@ -1020,6 +1020,10 @@ def detect_and_track(
     speeding_count = 0
     parking_warnings = 0
     parking_violations = 0
+    red_light_violations = 0
+    
+    # Get frame dimensions for red light check
+    frame_height = frame.shape[0]
     
     # Get member services
     lane_service = get_lane_weaving_service()
@@ -1047,6 +1051,12 @@ def detect_and_track(
             parking_warnings += 1
         elif parking_status == "violation":
             parking_violations += 1
+        
+        # ===== MEMBER 2: Red Light Violation Detection =====
+        is_red_light_violator = check_red_light_violation(det, frame_height, timestamp)
+        if is_red_light_violator:
+            det.is_penalized = True
+            red_light_violations += 1
         
         # ===== MEMBER 2: Lane Weaving Detection =====
         if lane_service:
@@ -1095,8 +1105,170 @@ def detect_and_track(
 
 
 # ============================================================================
+# RED LIGHT VIOLATION DETECTION (Member 2 Feature)
+# ============================================================================
+
+# Stop line position (relative to frame height)
+STOP_LINE_RATIO = 0.6  # 60% down from top
+
+# Red light violation tracking
+_red_light_violators: Dict[int, float] = {}  # track_id -> violation_time
+
+def check_red_light_violation(
+    det: Detection,
+    frame_height: int,
+    current_time: float,
+) -> bool:
+    """
+    Check if a vehicle is violating a red light.
+    
+    Logic:
+    - Get current signal state for North lane (video feed)
+    - Define stop line at STOP_LINE_RATIO of frame height
+    - If signal is RED and vehicle Y position > stop line and speed > 10 km/h:
+      - Trigger penalty
+    
+    Args:
+        det: Detection object with vehicle info
+        frame_height: Height of the video frame
+        current_time: Current timestamp
+    
+    Returns:
+        True if violation detected, False otherwise
+    """
+    global _red_light_violators
+    
+    # Get traffic controller
+    controller = get_traffic_controller()
+    if controller is None:
+        return False
+    
+    try:
+        # Get North lane state (the video feed lane)
+        status = controller.get_all_states()
+        north_state = status.get('lanes', {}).get('north', {}).get('state', 'green')
+        
+        # Only check when light is RED
+        if north_state != 'red':
+            return False
+        
+        # Calculate stop line position
+        stop_line_y = int(frame_height * STOP_LINE_RATIO)
+        
+        # Get vehicle bottom position (y2)
+        _, _, _, vehicle_y = det.bbox
+        
+        # Check if vehicle crossed the stop line (bottom of bbox past stop line)
+        crossed_line = vehicle_y > stop_line_y
+        
+        # Check if vehicle is moving (speed > 10 km/h)
+        is_moving = det.speed_kmh > 10.0 or det.speed_pixels > 20.0
+        
+        # Violation: Red light + crossed line + moving
+        if crossed_line and is_moving:
+            track_id = det.track_id
+            
+            # Avoid duplicate violations (5 second cooldown)
+            if track_id in _red_light_violators:
+                last_violation_time = _red_light_violators[track_id]
+                if (current_time - last_violation_time) < 5.0:
+                    return True  # Still in violation state but don't re-penalize
+            
+            # Record violation
+            _red_light_violators[track_id] = current_time
+            
+            # Get plate if available
+            plate_text = det.plate_text or f"UNKNOWN_{track_id}"
+            
+            # Apply penalty
+            _apply_red_light_penalty(track_id, plate_text, det.speed_kmh)
+            
+            return True
+        
+        return False
+        
+    except Exception as e:
+        print(f"[RED_LIGHT] Error checking violation: {e}")
+        return False
+
+
+def _apply_red_light_penalty(track_id: int, plate_text: str, speed: float):
+    """Apply red light violation penalty to database."""
+    global penalized_vehicles
+    
+    scoring = get_scoring_engine()
+    driver_id = plate_text
+    
+    # TTS warning
+    speak_warning(
+        f"Red light violation detected! Vehicle {plate_text} ran a red light at {speed:.0f} kilometers per hour.",
+        track_id=track_id,
+        warning_type="red_light"
+    )
+    
+    if scoring["engine"] is None:
+        print(f"[RED_LIGHT] ⚠️ Scoring engine not available. Would penalize: {driver_id}")
+        return
+    
+    ViolationType = scoring["ViolationType"]
+    
+    try:
+        # Check if ViolationType has RED_LIGHT_RUNNING, else use SPEEDING as fallback
+        violation_type = getattr(ViolationType, 'RED_LIGHT_RUNNING', ViolationType.SPEEDING)
+        
+        driver, violation = scoring["engine"].record_violation(
+            driver_id=driver_id,
+            violation_type=violation_type,
+            location="Traffic Camera",
+            license_plate=plate_text,
+            notes=f"Red Light Violation: Crossed stop line at {speed:.0f} km/h",
+        )
+        print(f"[RED_LIGHT] 🚨 VIOLATION DB SAVED: {driver_id} | Speed: {speed:.0f} km/h | Fine: ${violation.fine_amount}")
+        
+        penalized_vehicles[track_id] = time.time()
+        
+    except Exception as e:
+        print(f"[RED_LIGHT] Error saving to DB: {e}")
+
+
+def get_north_signal_state() -> str:
+    """Get current signal state for North lane."""
+    controller = get_traffic_controller()
+    if controller is None:
+        return 'unknown'
+    
+    try:
+        status = controller.get_all_states()
+        return status.get('lanes', {}).get('north', {}).get('state', 'unknown')
+    except:
+        return 'unknown'
+
+
+# ============================================================================
 # VISUALIZATION
 # ============================================================================
+
+def draw_stop_line(frame: np.ndarray) -> np.ndarray:
+    """Draw the stop line on the frame when light is red."""
+    h, w = frame.shape[:2]
+    signal_state = get_north_signal_state()
+    
+    if signal_state == 'red':
+        stop_line_y = int(h * STOP_LINE_RATIO)
+        # Draw thick red line
+        cv2.line(frame, (0, stop_line_y), (w, stop_line_y), (0, 0, 255), 4)
+        # Add label
+        cv2.putText(frame, "STOP LINE - RED LIGHT", (10, stop_line_y - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+    elif signal_state == 'yellow':
+        stop_line_y = int(h * STOP_LINE_RATIO)
+        # Draw yellow line (warning)
+        cv2.line(frame, (0, stop_line_y), (w, stop_line_y), (0, 255, 255), 2)
+        cv2.putText(frame, "STOP LINE - YELLOW", (10, stop_line_y - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+    
+    return frame
+
 
 def draw_parking_zones(frame: np.ndarray) -> np.ndarray:
     """Draw the parking zone boundaries on the frame."""
@@ -1127,6 +1299,7 @@ def draw_detections(
     show_track_id: bool = True,
     show_speed: bool = True,
     show_parking_zones: bool = True,
+    show_stop_line: bool = True,
     box_thickness: int = 2,
 ) -> np.ndarray:
     """
@@ -1136,7 +1309,11 @@ def draw_detections(
     """
     annotated = frame.copy()
     
-    # Draw parking zones first
+    # Draw stop line first (when light is red)
+    if show_stop_line:
+        annotated = draw_stop_line(annotated)
+    
+    # Draw parking zones
     if show_parking_zones:
         annotated = draw_parking_zones(annotated)
     
