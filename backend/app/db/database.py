@@ -67,6 +67,26 @@ DB_SCHEMA = {
         "FOREIGN KEY (driver_id) REFERENCES drivers(driver_id)"
         ")"
     ),
+    "parking_zones": (
+        "CREATE TABLE IF NOT EXISTS parking_zones ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "zone_type TEXT NOT NULL,"  # 'red' (no parking) or 'yellow' (loading)
+        "coordinates TEXT NOT NULL,"  # JSON string: [[x1,y1], [x2,y2], ...]
+        "label TEXT,"
+        "active INTEGER DEFAULT 1,"
+        "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,"
+        "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+        ")"
+    ),
+    "audit_logs": (
+        "CREATE TABLE IF NOT EXISTS audit_logs ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "admin_username TEXT NOT NULL,"
+        "action TEXT NOT NULL,"
+        "details TEXT,"
+        "timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+        ")"
+    ),
 }
 
 

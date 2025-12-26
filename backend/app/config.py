@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     # --- Detection Settings ---
     detection_confidence: float = 0.5
     tracking_confidence: float = 0.4
-    frame_skip: int = 2  # Process every Nth frame for CPU optimization
+    frame_skip: int = 3  # Process every Nth frame for CPU optimization (higher = smoother)
     input_resolution: tuple = (1280, 720)  # Downscale input to this resolution
     
     # --- Parking Violation Settings ---

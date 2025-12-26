@@ -2,6 +2,9 @@ import 'package:flutter/foundation.dart';
 import '../core/network/api_client.dart';
 import '../core/network/api_endpoints.dart';
 
+// Re-export UnauthorizedException for convenience
+export '../core/network/api_client.dart' show UnauthorizedException;
+
 /// User types
 enum UserType { admin, driver, none }
 
@@ -66,6 +69,8 @@ class AuthProvider with ChangeNotifier {
   String? get userType => _user?.userType == UserType.admin ? 'admin' : (_user?.userType == UserType.driver ? 'driver' : null);
 
   /// Initialize auth state from stored token
+  /// Validates the token with backend /auth/me endpoint
+  /// Throws UnauthorizedException if token is invalid (caught internally)
   Future<void> initialize() async {
     _state = AuthState.loading;
     notifyListeners();
@@ -75,7 +80,22 @@ class AuthProvider with ChangeNotifier {
       if (storedToken != null && storedToken.isNotEmpty) {
         _token = storedToken;
         
-        // Get stored user type and data
+        // CRITICAL: Validate token with backend before auto-login
+        // This will throw UnauthorizedException if token is invalid (401)
+        final validateResponse = await _apiClient.get('/auth/me');
+        
+        if (!validateResponse.success) {
+          // Token validation failed - force logout
+          print('[AUTH] Token validation failed - clearing stale token');
+          await _apiClient.clearToken();
+          _token = null;
+          _user = null;
+          _state = AuthState.unauthenticated;
+          notifyListeners();
+          return;
+        }
+        
+        // Token is valid - get user info from response or stored data
         final userTypeStr = await _apiClient.getUserType();
         final userData = await _apiClient.getUserData();
         
@@ -83,15 +103,40 @@ class AuthProvider with ChangeNotifier {
           final userType = userTypeStr == 'admin' ? UserType.admin : UserType.driver;
           _user = User.fromJson(userData, userType);
           _state = AuthState.authenticated;
+          print('[AUTH] Token validated - user authenticated as $userTypeStr');
         } else {
-          // Token exists but no user data, clear and require login
-          await _apiClient.clearToken();
-          _state = AuthState.unauthenticated;
+          // Token valid but no user data stored, try to get from validation response
+          if (validateResponse.data != null) {
+            final respData = validateResponse.data!;
+            final respUserType = respData['user_type'] == 'admin' ? UserType.admin : UserType.driver;
+            _user = User(
+              id: respData['user_id'] ?? 0,
+              phone: respData['identifier'] ?? '',
+              userType: respUserType,
+            );
+            _state = AuthState.authenticated;
+          } else {
+            // Can't restore user data - clear and require login
+            await _apiClient.clearToken();
+            _state = AuthState.unauthenticated;
+          }
         }
       } else {
         _state = AuthState.unauthenticated;
       }
+    } on UnauthorizedException {
+      // 401 received - token is invalid, force logout
+      print('[AUTH] UnauthorizedException - token invalid, clearing');
+      await _apiClient.clearToken();
+      _token = null;
+      _user = null;
+      _state = AuthState.unauthenticated;
     } catch (e) {
+      // Network error or other issue - clear token and require login
+      print('[AUTH] Initialize error: $e - clearing token');
+      await _apiClient.clearToken();
+      _token = null;
+      _user = null;
       _state = AuthState.unauthenticated;
       _error = e.toString();
     }
@@ -276,8 +321,23 @@ class AuthProvider with ChangeNotifier {
     }
   }
 
-  /// Logout
+  /// Logout - stops video stream and clears auth
   Future<void> logout() async {
+    // Stop the backend video stream and TTS before clearing auth
+    // Use a timeout to prevent hanging if backend is unresponsive
+    try {
+      await _apiClient.post(ApiEndpoints.videoStop).timeout(
+        const Duration(seconds: 2),
+        onTimeout: () {
+          // Return empty response on timeout - don't block logout
+          return ApiResponse(success: true, data: null, statusCode: 200);
+        },
+      );
+    } catch (e) {
+      // Ignore errors - stream might not be running
+    }
+    
+    // Clear auth state immediately - don't wait for backend
     await _apiClient.clearToken();
     _token = null;
     _user = null;

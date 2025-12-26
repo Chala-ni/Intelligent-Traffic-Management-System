@@ -4,12 +4,17 @@ class AppConfig {
 
   // ============== API CONFIGURATION ==============
   
-  /// Base URL for the FastAPI backend
+  /// Base URL for the FastAPI backend (data APIs)
   /// Change this to your server IP in production
   static const String apiBaseUrl = 'http://127.0.0.1:8000';
   
-  /// Video stream endpoint
-  static const String videoStreamUrl = '$apiBaseUrl/video/detect-stream';
+  /// Base URL for video-related endpoints
+  /// Uses 'localhost' instead of '127.0.0.1' to bypass browser's 6-connection limit
+  /// Browser treats localhost and 127.0.0.1 as different origins = separate connection pools
+  static const String videoBaseUrl = 'http://localhost:8000';
+  
+  /// Video stream endpoint (MJPEG stream with detection overlay)
+  static const String videoStreamUrl = '$videoBaseUrl/video/stream';
   
   /// API timeout duration
   static const Duration apiTimeout = Duration(seconds: 30);

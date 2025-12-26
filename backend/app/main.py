@@ -23,6 +23,7 @@ from app.routers.auth import router as auth_router
 from app.routers.driver import router as driver_router
 from app.routers.admin import router as admin_router
 from app.routers.community import router as community_router
+from app.routers.config import router as config_router
 from app.db.database import init_db
 
 settings = get_settings()
@@ -86,6 +87,7 @@ app.include_router(auth_router)       # Authentication: JWT login/register
 app.include_router(driver_router)     # Driver mobile app endpoints
 app.include_router(admin_router)      # Admin dashboard endpoints
 app.include_router(community_router)  # Public community endpoints
+app.include_router(config_router)     # Admin zone configuration & audit logs
 
 # --- Static Files (for simulation UI and videos) ---
 from pathlib import Path

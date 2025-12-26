@@ -397,8 +397,10 @@ class FourWayTrafficController:
     def activate_emergency_mode(self, lane: str = 'north') -> Dict:
         """
         Activate emergency mode for a specific lane.
-        Forces that lane GREEN immediately, all others RED.
+        Forces that lane GREEN immediately, ALL others RED.
         Called when ambulance is detected by YOLO.
+        
+        SAFETY: Only ONE lane can be green at a time.
         
         Args:
             lane: Lane to set GREEN (default 'north' since video = north)
@@ -413,14 +415,17 @@ class FourWayTrafficController:
         self.emergency_lane = lane
         self.emergency_start_time = time.time()
         
-        # Force lane states
+        # SAFETY: Force ALL lanes to RED first, then set target to GREEN
         for l in self.LANES:
-            self.lane_states[l] = 'green' if l == lane else 'red'
+            self.lane_states[l] = 'red'
+        self.lane_states[lane] = 'green'
         
         self.current_green_lane = lane
         self.is_yellow_phase = False
+        self.green_remaining = self.emergency_duration
+        self.yellow_remaining = 0
         
-        print(f"[EMERGENCY] Lane {lane.upper()} forced GREEN - Ambulance detected!")
+        print(f"[EMERGENCY] 🚑 Lane {lane.upper()} forced GREEN - ALL others RED!")
         
         return {
             'status': 'emergency_activated',
@@ -458,7 +463,12 @@ class FourWayTrafficController:
                 self.deactivate_emergency_mode()
     
     def _advance_to_next_lane(self):
-        """Move to the next lane in the round-robin cycle."""
+        """
+        Move to the next lane in the round-robin cycle.
+        
+        SAFETY: Ensures only ONE lane is green at a time.
+        All other lanes are explicitly set to RED.
+        """
         current_idx = self.CYCLE_ORDER.index(self.current_green_lane)
         next_idx = (current_idx + 1) % len(self.CYCLE_ORDER)
         next_lane = self.CYCLE_ORDER[next_idx]
@@ -467,16 +477,37 @@ class FourWayTrafficController:
         vehicle_count = self.lane_counts[next_lane]
         self.green_remaining = self.fuzzy_controller.compute_green_duration(vehicle_count)
         
-        # Update states
-        self.current_green_lane = next_lane
+        # SAFETY: Set ALL lanes to RED first, then set the next lane to GREEN
         for lane in self.LANES:
-            self.lane_states[lane] = 'green' if lane == next_lane else 'red'
+            self.lane_states[lane] = 'red'
+        self.lane_states[next_lane] = 'green'
         
+        self.current_green_lane = next_lane
         self.is_yellow_phase = False
-    
+        self.yellow_remaining = 0
+
+    def _set_single_lane_state(self, target_lane: str, state: str):
+        """
+        SAFETY HELPER: Set one lane to a specific state, all others to RED.
+        
+        This ensures only ONE lane can ever be non-red at a time.
+        
+        Args:
+            target_lane: The lane to set to the given state
+            state: 'green', 'yellow', or 'red'
+        """
+        for lane in self.LANES:
+            if lane == target_lane:
+                self.lane_states[lane] = state
+            else:
+                self.lane_states[lane] = 'red'
+
     def tick(self, elapsed_seconds: int = 1) -> Dict:
         """
         Advance the signal cycle by elapsed seconds.
+        
+        SAFETY: Only ONE lane can be green or yellow at any time.
+        All other lanes are always RED.
         
         Args:
             elapsed_seconds: Time elapsed since last tick (default 1)
@@ -492,6 +523,8 @@ class FourWayTrafficController:
         
         # Don't advance if in emergency mode
         if self.emergency_mode:
+            # SAFETY: Ensure emergency lane is green, all others red
+            self._set_single_lane_state(self.emergency_lane, 'green')
             return self.get_all_states()
         
         # Handle yellow phase
@@ -499,6 +532,9 @@ class FourWayTrafficController:
             self.yellow_remaining -= elapsed_seconds
             if self.yellow_remaining <= 0:
                 self._advance_to_next_lane()
+            else:
+                # SAFETY: Keep current lane yellow, all others red
+                self._set_single_lane_state(self.current_green_lane, 'yellow')
         else:
             # Green phase countdown
             self.green_remaining -= elapsed_seconds
@@ -507,8 +543,11 @@ class FourWayTrafficController:
                 # Transition to yellow
                 self.is_yellow_phase = True
                 self.yellow_remaining = 3  # 3 second yellow
-                self.lane_states[self.current_green_lane] = 'yellow'
-        
+                # SAFETY: Set current lane to yellow, all others red
+                self._set_single_lane_state(self.current_green_lane, 'yellow')
+            else:
+                # SAFETY: Keep current lane green, all others red
+                self._set_single_lane_state(self.current_green_lane, 'green')
         return self.get_all_states()
     
     def auto_tick(self) -> Dict:

@@ -3,6 +3,16 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../config/app_config.dart';
 
+/// Exception thrown when user is not authorized (401)
+/// UI should catch this and redirect to login
+class UnauthorizedException implements Exception {
+  final String message;
+  UnauthorizedException([this.message = 'Unauthorized - please login again']);
+  
+  @override
+  String toString() => message;
+}
+
 /// API Response wrapper
 class ApiResponse<T> {
   final bool success;
@@ -189,8 +199,14 @@ class ApiClient {
   }
 
   /// Handle HTTP response
+  /// Throws UnauthorizedException on 401 to force redirect to login
   ApiResponse<Map<String, dynamic>> _handleResponse(http.Response response) {
     final statusCode = response.statusCode;
+    
+    // CRITICAL: Throw exception on 401 to force login redirect
+    if (statusCode == 401) {
+      throw UnauthorizedException('Session expired - please login again');
+    }
     
     try {
       final data = jsonDecode(response.body) as Map<String, dynamic>;
@@ -202,6 +218,9 @@ class ApiClient {
         return ApiResponse.error(error.toString(), statusCode);
       }
     } catch (e) {
+      // Re-throw UnauthorizedException if it was thrown above
+      if (e is UnauthorizedException) rethrow;
+      
       if (statusCode >= 200 && statusCode < 300) {
         return ApiResponse.success({}, statusCode);
       }

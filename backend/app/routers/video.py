@@ -5,17 +5,24 @@ MJPEG streaming with real-time YOLOv8 two-stage detection overlay
 Sprint G (Revision): Uses "Zoom" detection pipeline:
 - Stage 1: Vehicle tracking (wide view)
 - Stage 2: Plate detection via cropping each vehicle (zoom view)
+
+Client disconnect detection: Properly stops stream when frontend disconnects.
+WebSocket streaming: Alternative to MJPEG for better browser compatibility.
 """
 
 import asyncio
 import time
+import json
+import base64
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
 
 import cv2
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+import aiosqlite
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
+from starlette.background import BackgroundTask
 
 from app.config import get_settings
 from app.detection.yolo_detector import (
@@ -26,15 +33,25 @@ from app.detection.yolo_detector import (
     draw_frame_info,
     FrameResult,
     VEHICLE_CLASSES,
+    set_parking_zones,
 )
 from app.routers.parking import get_detector  # import parking detector to overlay zones
+from app.tts.tts_service import set_tts_paused  # Control TTS based on stream state
 
 settings = get_settings()
 router = APIRouter(prefix="/video", tags=["Video"])
 
+# Database path
+DB_PATH = settings.data_dir.parent / "backend" / "traffic.db"
+
+# Active stream connections counter
+_active_connections = 0
+_connections_lock = asyncio.Lock()
+
 # Global state for pipeline control
 _pipeline_state = {
     "running": False,
+    "stop_requested": False,
     "video_source": None,
     "model": None,
     "plate_model": None,
@@ -44,6 +61,58 @@ _pipeline_state = {
     "start_time": None,
     "last_frame_time": None,
 }
+
+
+async def load_zones_from_db():
+    """Load parking zones from admin dashboard DB and update detector."""
+    try:
+        if not DB_PATH.exists():
+            print(f"[ZONES] DB not found at {DB_PATH}, using default zones")
+            return
+        
+        async with aiosqlite.connect(str(DB_PATH)) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM parking_zones WHERE active = 1 ORDER BY id"
+            )
+            rows = await cursor.fetchall()
+            
+            if not rows:
+                # No zones in DB - clear default zones so no violations are issued
+                print("[ZONES] No active zones in DB, disabling violation detection")
+                set_parking_zones([])
+                return
+            
+            # Convert to detector format
+            zones = []
+            for row in rows:
+                coords = json.loads(row["coordinates"])
+                # Convert [[x,y], [x,y]...] to [(x,y), (x,y)...]
+                polygon = [(int(p[0]), int(p[1])) for p in coords]
+                
+                # Map zone_type to color
+                zone_type = row["zone_type"]
+                if zone_type in ("red", "no_parking"):
+                    color = (0, 0, 255)  # Red
+                elif zone_type in ("yellow", "loading"):
+                    color = (0, 255, 255)  # Yellow
+                elif zone_type in ("blue", "handicap"):
+                    color = (255, 0, 0)  # Blue
+                else:
+                    color = (0, 0, 255)  # Default red
+                
+                zones.append({
+                    "id": f"zone_{row['id']}",
+                    "name": row["label"] or f"Zone {row['id']}",
+                    "polygon": polygon,
+                    "color": color,
+                })
+            
+            set_parking_zones(zones)
+            print(f"[ZONES] ✅ Loaded {len(zones)} zones from admin dashboard DB")
+            
+    except Exception as e:
+        print(f"[ZONES] ❌ Error loading zones: {e}")
 
 
 def get_pipeline_state() -> dict:
@@ -58,6 +127,7 @@ def reset_pipeline_state():
     """Reset pipeline state."""
     _pipeline_state.update({
         "running": False,
+        "stop_requested": False,
         "video_source": None,
         "frames_processed": 0,
         "total_detections": 0,
@@ -65,6 +135,30 @@ def reset_pipeline_state():
         "start_time": None,
         "last_frame_time": None,
     })
+
+
+# Initialize with TTS paused (no active streams yet)
+set_tts_paused(True)
+
+
+@router.post("/stop")
+async def stop_stream():
+    """
+    Stop the current video stream and pause TTS.
+    Called when frontend logs out or navigates away.
+    """
+    global _active_connections
+    
+    _pipeline_state["stop_requested"] = True
+    _pipeline_state["running"] = False
+    
+    async with _connections_lock:
+        _active_connections = 0
+    
+    set_tts_paused(True)
+    
+    print("[STREAM] ⏹️ Stop requested via API")
+    return {"status": "stopped", "message": "Stream stopped and TTS paused"}
 
 
 async def generate_mjpeg_frames(
@@ -90,6 +184,19 @@ async def generate_mjpeg_frames(
         max_fps: Maximum output FPS (throttle for browser)
         detect_plates_flag: Whether to run plate detection on detected vehicles
     """
+    global _active_connections
+    
+    # Track active connections and enable TTS
+    async with _connections_lock:
+        _active_connections += 1
+        if _active_connections == 1:
+            set_tts_paused(False)  # Resume TTS when first stream starts
+    
+    print(f"[STREAM] 📡 Client connected (active: {_active_connections})")
+    
+    # Load parking zones from admin dashboard DB
+    await load_zones_from_db()
+    
     print(f"[STREAM] 🎬 Starting video stream: {video_path}")
     print(f"[STREAM]    frame_skip={frame_skip}, detect_plates={detect_plates_flag}")
     
@@ -97,11 +204,19 @@ async def generate_mjpeg_frames(
     confidence = confidence or settings.detection_confidence
     min_frame_time = 1.0 / max_fps
     
+    # Reset stop flag
+    _pipeline_state["stop_requested"] = False
+    
     # Open video with optimized buffering
     cap = cv2.VideoCapture(video_path)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 3)  # Reduce buffer for smoother playback
     if not cap.isOpened():
         print(f"[STREAM] ❌ Cannot open video: {video_path}")
+        # Decrement connection count on error
+        async with _connections_lock:
+            _active_connections = max(0, _active_connections - 1)
+            if _active_connections == 0:
+                set_tts_paused(True)
         raise HTTPException(status_code=404, detail=f"Cannot open video: {video_path}")
     
     # Load models using new two-stage API
@@ -125,79 +240,102 @@ async def generate_mjpeg_frames(
     
     frame_idx = 0
     log_interval = 50  # Log every 50 frames
+    output_frame_count = 0  # Count frames actually sent to browser
     
     try:
-        while _pipeline_state["running"]:
+        while _pipeline_state["running"] and not _pipeline_state["stop_requested"]:
             frame_start = time.time()
+            
+            # Skip frames in the video file itself for smooth playback
+            # This avoids reading every frame which causes stuttering
+            if frame_skip > 1:
+                # Jump ahead by frame_skip frames
+                current_pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+                cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos + frame_skip - 1)
             
             ret, frame = cap.read()
             if not ret:
                 # Loop video for continuous demo
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 frame_idx = 0
+                output_frame_count = 0
                 continue
             
-            # Process only every Nth frame for performance
-            if frame_idx % frame_skip == 0:
-                if show_detections:
-                    # Use new two-stage detect_and_track API
-                    # This handles both vehicle tracking AND plate detection internally
-                    result = detect_and_track(
-                        vehicle_model=vehicle_model,
-                        frame=frame,
-                        frame_id=frame_idx,
-                        confidence=confidence,
-                        plate_model=plate_model,
-                        run_plate_detection=detect_plates_flag,
-                    )
-                    
-                    _pipeline_state["frames_processed"] += 1
-                    _pipeline_state["total_detections"] += len(result.detections)
-                    _pipeline_state["plates_detected"] += len(result.plate_boxes)
-                    _pipeline_state["last_frame_time"] = time.time()
-                    
-                    # Log progress periodically
-                    if frame_idx % log_interval == 0:
-                        print(f"[STREAM] Frame {frame_idx}: {len(result.detections)} vehicles, {len(result.plate_boxes)} plates")
-                    
-                    # Draw parking zones overlay (if available)
-                    # Skip parking zones for now to avoid blocking
-                    # try:
-                    #     parking_detector = await get_detector()
-                    #     if parking_detector:
-                    #         frame = parking_detector.draw_zones(frame)
-                    # except Exception:
-                    #     pass
-
-                    # Draw detections using new visualization API
-                    frame = draw_detections(frame, result)
-                    
-                    # Add frame info overlay
-                    frame = draw_frame_info(frame, result)
-                
-                # Resize for streaming (reduce bandwidth)
-                scale = 0.75
-                frame = cv2.resize(frame, None, fx=scale, fy=scale)
-                
-                # Encode to JPEG
-                _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                
-                # Yield as multipart MJPEG frame
-                yield (
-                    b'--frame\r\n'
-                    b'Content-Type: image/jpeg\r\n\r\n' + 
-                    buffer.tobytes() + 
-                    b'\r\n'
+            frame_idx += frame_skip  # Track actual frame position
+            
+            # Check if stop was requested
+            if _pipeline_state["stop_requested"]:
+                print("[STREAM] ⏹️ Stop requested, ending stream")
+                break
+            
+            # Process every frame we read (since we already skipped in the video)
+            if show_detections:
+                # Use new two-stage detect_and_track API
+                # This handles both vehicle tracking AND plate detection internally
+                result = detect_and_track(
+                    vehicle_model=vehicle_model,
+                    frame=frame,
+                    frame_id=frame_idx,
+                    confidence=confidence,
+                    plate_model=plate_model,
+                    run_plate_detection=detect_plates_flag,
                 )
+                
+                _pipeline_state["frames_processed"] += 1
+                _pipeline_state["total_detections"] += len(result.detections)
+                _pipeline_state["plates_detected"] += len(result.plate_boxes)
+                _pipeline_state["last_frame_time"] = time.time()
+                
+                # Log progress periodically
+                if output_frame_count % log_interval == 0:
+                    print(f"[STREAM] Frame {frame_idx}: {len(result.detections)} vehicles, {len(result.plate_boxes)} plates")
+                
+                # Draw detections using new visualization API
+                frame = draw_detections(frame, result)
+                
+                # Add frame info overlay
+                frame = draw_frame_info(frame, result)
             
-            frame_idx += 1
+            # Resize for streaming (reduce bandwidth)
+            scale = 0.75
+            frame = cv2.resize(frame, None, fx=scale, fy=scale)
             
-            # Minimal throttle for smoother playback
+            # Encode to JPEG with good quality
+            _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            
+            output_frame_count += 1
+            
+            # Yield as multipart MJPEG frame
+            yield (
+                b'--frame\r\n'
+                b'Content-Type: image/jpeg\r\n\r\n' + 
+                buffer.tobytes() + 
+                b'\r\n'
+            )
+            
+            # Throttle for consistent frame rate
             elapsed = time.time() - frame_start
             if elapsed < min_frame_time:
                 await asyncio.sleep(max(0.001, min_frame_time - elapsed))
+            
+            # CRITICAL: Yield CPU to allow API requests (zones, logs) to be processed
+            await asyncio.sleep(0.01)
+    
+    except (asyncio.CancelledError, GeneratorExit):
+        # Client disconnected (browser closed, navigation, logout, etc.)
+        print(f"[STREAM] 📴 Client disconnected (cancelled)")
+    
+    except Exception as e:
+        print(f"[STREAM] ❌ Stream error: {e}")
                 
     finally:
+        # Decrement connection count and pause TTS if no active streams
+        async with _connections_lock:
+            _active_connections = max(0, _active_connections - 1)
+            print(f"[STREAM] 📡 Client disconnected (remaining: {_active_connections})")
+            if _active_connections == 0:
+                set_tts_paused(True)  # Pause TTS when no streams active
+        
         print(f"[STREAM] 🛑 Stream stopped. Processed {_pipeline_state['frames_processed']} frames, {_pipeline_state['total_detections']} detections")
         cap.release()
         reset_pipeline_state()
@@ -206,7 +344,7 @@ async def generate_mjpeg_frames(
 @router.get("/stream")
 async def stream_video(
     source: str = None,
-    skip: int = None,
+    skip: int = 3,
     confidence: float = None,
     detections: bool = True,
     detect_plates: bool = False,
@@ -216,7 +354,7 @@ async def stream_video(
     
     Args:
         source: Path to video file (default: sample video)
-        skip: Process every Nth frame (default: 3)
+        skip: Process every Nth frame (default: 3, higher = smoother)
         confidence: Detection confidence threshold (default: 0.5)
         detections: Show detection boxes (default: true)
         detect_plates: Run license plate detection on vehicles (default: false)
@@ -276,7 +414,9 @@ async def stop_stream():
     if not _pipeline_state["running"]:
         return {"status": "not_running", "message": "No stream is currently active"}
     
+    _pipeline_state["stop_requested"] = True
     _pipeline_state["running"] = False
+    print("[STREAM] ⏹️ Stop requested via API")
     return {"status": "stopping", "message": "Stream stop requested"}
 
 
@@ -304,3 +444,133 @@ async def list_videos():
             cap.release()
     
     return {"videos": videos}
+
+
+@router.websocket("/ws")
+async def websocket_video_stream(websocket: WebSocket):
+    """
+    WebSocket endpoint for video streaming.
+    Sends Base64-encoded JPEG frames to bypass browser connection limits.
+    """
+    global _active_connections
+    
+    await websocket.accept()
+    print("[WS-STREAM] 📡 WebSocket client connected")
+    
+    # Load zones from database
+    await load_zones_from_db()
+    
+    # Increment connection count and enable TTS
+    async with _connections_lock:
+        _active_connections += 1
+        set_tts_paused(False)
+    
+    # Default video source
+    video_path = str(settings.data_dir / "videos" / "SriLankan_Traffic_Video.mp4")
+    if not Path(video_path).exists():
+        videos_dir = Path(settings.data_dir) / "videos"
+        if videos_dir.exists():
+            video_files = list(videos_dir.glob("*.mp4"))
+            if video_files:
+                video_path = str(video_files[0])
+            else:
+                await websocket.close(code=1003, reason="No video files found")
+                return
+    
+    cap = cv2.VideoCapture(video_path)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 3)
+    
+    if not cap.isOpened():
+        await websocket.close(code=1003, reason="Cannot open video")
+        async with _connections_lock:
+            _active_connections = max(0, _active_connections - 1)
+            if _active_connections == 0:
+                set_tts_paused(True)
+        return
+    
+    # Load models
+    vehicle_model = load_vehicle_model("cpu")
+    plate_model = load_plate_model("cpu")
+    
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    print(f"[WS-STREAM] ✅ Video opened: {total_frames} frames")
+    
+    _pipeline_state["running"] = True
+    _pipeline_state["video_source"] = video_path
+    _pipeline_state["start_time"] = time.time()
+    
+    frame_idx = 0
+    frame_skip = 3
+    target_fps = 20
+    min_frame_time = 1.0 / target_fps
+    
+    try:
+        while True:
+            frame_start = time.time()
+            
+            # Skip frames for performance
+            if frame_skip > 1:
+                current_pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+                cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos + frame_skip - 1)
+            
+            ret, frame = cap.read()
+            if not ret:
+                # Loop video
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                frame_idx = 0
+                continue
+            
+            frame_idx += frame_skip
+            
+            # Detect and track
+            result = detect_and_track(
+                vehicle_model=vehicle_model,
+                frame=frame,
+                frame_id=frame_idx,
+                confidence=0.5,
+                plate_model=plate_model,
+                run_plate_detection=True,
+            )
+            
+            _pipeline_state["frames_processed"] += 1
+            _pipeline_state["total_detections"] += len(result.detections)
+            _pipeline_state["plates_detected"] += len(result.plate_boxes)
+            
+            # Draw detections
+            frame = draw_detections(frame, result)
+            frame = draw_frame_info(frame, result)
+            
+            # Resize for bandwidth
+            scale = 0.75
+            frame = cv2.resize(frame, None, fx=scale, fy=scale)
+            
+            # Encode to JPEG
+            _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            
+            # Convert to Base64 and send
+            base64_frame = base64.b64encode(buffer.tobytes()).decode('utf-8')
+            await websocket.send_text(base64_frame)
+            
+            # Throttle to target FPS
+            elapsed = time.time() - frame_start
+            if elapsed < min_frame_time:
+                await asyncio.sleep(min_frame_time - elapsed)
+            
+            # CRITICAL: Yield CPU to allow API requests (zones, logs) to be processed
+            await asyncio.sleep(0.01)
+    
+    except WebSocketDisconnect:
+        print("[WS-STREAM] 📴 WebSocket client disconnected")
+    
+    except Exception as e:
+        print(f"[WS-STREAM] ❌ Error: {e}")
+    
+    finally:
+        cap.release()
+        async with _connections_lock:
+            _active_connections = max(0, _active_connections - 1)
+            print(f"[WS-STREAM] 📡 Client disconnected (remaining: {_active_connections})")
+            if _active_connections == 0:
+                set_tts_paused(True)
+        reset_pipeline_state()
+        print(f"[WS-STREAM] 🛑 Stream stopped. Processed {_pipeline_state['frames_processed']} frames")

@@ -19,6 +19,12 @@ class ApiEndpoints {
   static const String emergencyClear = '/admin/emergency/clear';
   static const String violationTrends = '/admin/analytics/violation-trends';
   static const String violationHotspots = '/admin/analytics/hotspots';
+  
+  // Admin config endpoints
+  static const String adminZones = '/admin/zones';
+  static const String adminLogs = '/admin/logs';
+  static const String videoSnapshot = '/admin/video/snapshot';
+  static const String adminStats = '/admin/stats';
 
   // ============== DRIVER ENDPOINTS ==============
   
@@ -47,6 +53,7 @@ class ApiEndpoints {
   
   static const String videoStream = '/video/detect-stream';
   static const String videoStatus = '/video/status';
+  static const String videoStop = '/video/stop';
 
   // ============== PARKING ENDPOINTS ==============
   
