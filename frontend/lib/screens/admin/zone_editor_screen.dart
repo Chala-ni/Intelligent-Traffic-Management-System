@@ -36,6 +36,9 @@ class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
   // Image dimensions for coordinate conversion
   Size _imageSize = const Size(1920, 1080);
   Size _displaySize = Size.zero;
+  
+  // Actual image display area (accounting for BoxFit.contain letterboxing)
+  Rect _imageRect = Rect.zero;
 
   @override
   void initState() {
@@ -177,11 +180,10 @@ class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
       return;
     }
     
-    // Convert screen coordinates to image coordinates
+    // Convert screen coordinates to image coordinates (accounting for letterboxing)
     final List<List<double>> coordinates = _currentPoints.map((p) {
-      final x = (p.dx / _displaySize.width) * _imageSize.width;
-      final y = (p.dy / _displaySize.height) * _imageSize.height;
-      return [x, y];
+      final imageCoord = _screenToImage(p);
+      return [imageCoord.dx, imageCoord.dy];
     }).toList();
     
     try {
@@ -255,6 +257,48 @@ class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
         _showError('Failed to delete zone');
       }
     }
+  }
+
+  /// Calculate the actual image display rect within the container
+  /// This accounts for BoxFit.contain letterboxing
+  void _calculateImageRect() {
+    if (_displaySize == Size.zero) return;
+    
+    final containerAspect = _displaySize.width / _displaySize.height;
+    final imageAspect = _imageSize.width / _imageSize.height;
+    
+    double displayedWidth, displayedHeight;
+    double offsetX = 0, offsetY = 0;
+    
+    if (containerAspect > imageAspect) {
+      // Container is wider - black bars on left/right
+      displayedHeight = _displaySize.height;
+      displayedWidth = displayedHeight * imageAspect;
+      offsetX = (_displaySize.width - displayedWidth) / 2;
+    } else {
+      // Container is taller - black bars on top/bottom
+      displayedWidth = _displaySize.width;
+      displayedHeight = displayedWidth / imageAspect;
+      offsetY = (_displaySize.height - displayedHeight) / 2;
+    }
+    
+    _imageRect = Rect.fromLTWH(offsetX, offsetY, displayedWidth, displayedHeight);
+  }
+  
+  /// Convert image coordinates to screen coordinates
+  Offset _imageToScreen(double imageX, double imageY) {
+    return Offset(
+      _imageRect.left + (imageX / _imageSize.width) * _imageRect.width,
+      _imageRect.top + (imageY / _imageSize.height) * _imageRect.height,
+    );
+  }
+  
+  /// Convert screen coordinates to image coordinates
+  Offset _screenToImage(Offset screenPoint) {
+    return Offset(
+      ((screenPoint.dx - _imageRect.left) / _imageRect.width) * _imageSize.width,
+      ((screenPoint.dy - _imageRect.top) / _imageRect.height) * _imageSize.height,
+    );
   }
 
   void _startDrawing() {
@@ -488,6 +532,7 @@ class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
         child: LayoutBuilder(
           builder: (context, constraints) {
             _displaySize = Size(constraints.maxWidth, constraints.maxHeight);
+            _calculateImageRect(); // Calculate actual image display area
             
             return GestureDetector(
               onTapDown: _isDrawing ? _handleTap : null,
@@ -705,9 +750,8 @@ class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
   List<Widget> _buildExistingZones() {
     return _zones.map((zone) {
       final points = zone.coordinates.map((coord) {
-        final x = (coord[0] / _imageSize.width) * _displaySize.width;
-        final y = (coord[1] / _imageSize.height) * _displaySize.height;
-        return Offset(x, y);
+        // Use proper coordinate conversion accounting for letterboxing
+        return _imageToScreen(coord[0], coord[1]);
       }).toList();
       
       final isSelected = _selectedZone?.id == zone.id;
