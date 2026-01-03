@@ -56,8 +56,9 @@ DB_PATH = settings.data_dir.parent / "backend" / "traffic.db"
 class VideoState:
     """Thread-safe container for video stream state."""
     # Core frame data
-    latest_frame_bytes: Optional[bytes] = None  # JPEG for streaming
-    latest_snapshot: Optional[bytes] = None     # High-quality snapshot for Zone Editor
+    latest_frame_bytes: Optional[bytes] = None  # JPEG for streaming (with detections)
+    latest_snapshot: Optional[bytes] = None     # Clean snapshot for Zone Editor (NO boxes/zones)
+    raw_frame_captured: bool = False            # Flag to capture clean frame once
     
     # Detection stats
     vehicle_count: int = 0
@@ -75,7 +76,7 @@ class VideoState:
     lock: threading.Lock = field(default_factory=threading.Lock)
     
     def update_frame(self, frame_bytes: bytes, vehicle_count: int, 
-                     plates: int = 0, is_first_frame: bool = False):
+                     plates: int = 0, raw_snapshot: Optional[bytes] = None):
         """Thread-safe frame update."""
         with self.lock:
             self.latest_frame_bytes = frame_bytes
@@ -85,10 +86,11 @@ class VideoState:
             self.plates_detected += plates
             self.last_frame_time = time.time()
             
-            # Capture first frame as snapshot immediately
-            if is_first_frame or self.latest_snapshot is None:
-                self.latest_snapshot = frame_bytes
-                print("[SNAPSHOT] ✅ First frame captured for Zone Editor")
+            # Capture clean snapshot (without boxes/zones) for Zone Editor
+            if raw_snapshot is not None and not self.raw_frame_captured:
+                self.latest_snapshot = raw_snapshot
+                self.raw_frame_captured = True
+                print("[SNAPSHOT] ✅ Clean frame captured for Zone Editor (no boxes)")
     
     def get_frame(self) -> Optional[bytes]:
         """Thread-safe frame retrieval."""
@@ -99,6 +101,11 @@ class VideoState:
         """Thread-safe snapshot retrieval."""
         with self.lock:
             return self.latest_snapshot
+    
+    def request_new_snapshot(self):
+        """Request a fresh clean snapshot on next frame."""
+        with self.lock:
+            self.raw_frame_captured = False
     
     def get_stats(self) -> dict:
         """Thread-safe stats retrieval."""
@@ -124,6 +131,7 @@ class VideoState:
             self.frames_processed = 0
             self.running = False
             self.start_time = None
+            self.raw_frame_captured = False  # Allow new clean capture on restart
 
 
 # Global state instance
@@ -276,6 +284,15 @@ def video_worker_loop():
             
             frame_idx += frame_skip
             
+            # Capture clean snapshot BEFORE drawing any boxes (for Zone Editor)
+            # IMPORTANT: Capture at FULL resolution to match zone coordinates
+            raw_snapshot_bytes = None
+            if not _video_state.raw_frame_captured:
+                # Encode clean frame at FULL resolution (no scaling)
+                # Zone coordinates are stored in original resolution, so snapshot must match
+                _, raw_buffer = cv2.imencode('.jpg', frame.copy(), [cv2.IMWRITE_JPEG_QUALITY, 90])
+                raw_snapshot_bytes = raw_buffer.tobytes()
+            
             # Run YOLO detection
             result = detect_and_track(
                 vehicle_model=vehicle_model,
@@ -311,10 +328,8 @@ def video_worker_loop():
                 frame_bytes=frame_bytes,
                 vehicle_count=vehicle_count,
                 plates=plate_count,
-                is_first_frame=is_first_frame
+                raw_snapshot=raw_snapshot_bytes
             )
-            
-            is_first_frame = False
             
             # Log progress periodically
             if frame_idx % log_interval == 0:
@@ -345,6 +360,15 @@ def start_video_worker():
         print("[WORKER] Already running")
         return
     
+    # Re-enable traffic controller auto-tick before starting
+    try:
+        from app.fuzzy.traffic_controller import get_four_way_controller
+        controller = get_four_way_controller()
+        controller.auto_tick_enabled = True
+        print("[WORKER] ✅ Traffic controller auto-tick enabled")
+    except Exception as e:
+        print(f"[WORKER] ⚠️ Could not enable traffic controller: {e}")
+    
     _stop_event.clear()
     _worker_thread = threading.Thread(target=video_worker_loop, daemon=True)
     _worker_thread.start()
@@ -352,13 +376,32 @@ def start_video_worker():
 
 
 def stop_video_worker():
-    """Stop the background video worker thread."""
+    """Stop the background video worker thread and all associated services."""
     global _worker_thread, _stop_event
     
     _stop_event.set()
     if _worker_thread:
         _worker_thread.join(timeout=5.0)
     _video_state.reset()
+    
+    # CRITICAL: Stop traffic controller auto-tick to prevent continued updates
+    try:
+        from app.fuzzy.traffic_controller import get_four_way_controller
+        controller = get_four_way_controller()
+        controller.auto_tick_enabled = False
+        print("[WORKER] ⏹️ Traffic controller auto-tick disabled")
+    except Exception as e:
+        print(f"[WORKER] ⚠️ Could not stop traffic controller: {e}")
+    
+    # Clean up TTS audio files to prevent disk buildup
+    try:
+        from app.tts.tts_service import get_tts_service
+        tts = get_tts_service()
+        tts.cleanup_old_warnings(max_files=20)  # Keep only 20 recent files
+        print("[WORKER] 🧹 TTS cache cleaned")
+    except Exception as e:
+        print(f"[WORKER] ⚠️ Could not clean TTS: {e}")
+    
     print("[WORKER] ⏹️ Worker thread stopped")
 
 
@@ -366,10 +409,8 @@ def stop_video_worker():
 # API ENDPOINTS - Lightweight, just serve from memory
 # ============================================================================
 
-@router.on_event("startup")
-async def startup_event():
-    """Start worker thread when FastAPI starts."""
-    start_video_worker()
+# NOTE: Worker starts lazily when first client connects (WebSocket or snapshot request)
+# This prevents video processing when no one is watching
 
 
 @router.get("/snapshot")
@@ -377,7 +418,18 @@ async def get_snapshot():
     """
     Return the latest snapshot for Zone Editor.
     INSTANT response - just reads from memory.
+    Starts video worker if not already running.
     """
+    # Lazy start: Start worker if not running
+    if not _video_state.running:
+        start_video_worker()
+        # Wait up to 15 seconds for first frame (YOLO models take time to load)
+        import asyncio
+        for _ in range(150):  # Max 15 seconds (model loading can take 5-10s)
+            await asyncio.sleep(0.1)
+            if _video_state.get_snapshot() is not None:
+                break
+    
     snapshot = _video_state.get_snapshot()
     
     if snapshot is None:
@@ -397,6 +449,23 @@ async def get_snapshot():
 async def get_stream_status():
     """Get current video streaming status - reads from memory."""
     return _video_state.get_stats()
+
+
+@router.post("/snapshot/refresh")
+async def refresh_snapshot():
+    """
+    Request a fresh clean snapshot for Zone Editor.
+    The next frame processed will be captured as a clean snapshot.
+    """
+    _video_state.request_new_snapshot()
+    
+    # Wait for new snapshot (max 2 seconds)
+    for _ in range(20):
+        await asyncio.sleep(0.1)
+        if _video_state.raw_frame_captured:
+            break
+    
+    return {"status": "refreshed", "message": "New clean snapshot will be captured"}
 
 
 @router.post("/stop")
@@ -442,9 +511,19 @@ async def websocket_video_stream(websocket: WebSocket):
     """
     WebSocket endpoint for video streaming.
     LIGHTWEIGHT: Just sends frames from memory, no processing here.
+    Lazy-starts the video worker if not already running.
     """
     await websocket.accept()
     print("[WS] 📡 Client connected")
+    
+    # Lazy start: Start worker if not running
+    if not _video_state.running:
+        start_video_worker()
+        # Wait a bit for first frame
+        for _ in range(30):  # Max 3 seconds
+            await asyncio.sleep(0.1)
+            if _video_state.get_frame() is not None:
+                break
     
     try:
         while True:

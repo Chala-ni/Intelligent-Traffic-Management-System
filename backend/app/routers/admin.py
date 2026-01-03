@@ -3,10 +3,12 @@ Admin API Router - Protected endpoints for admin dashboard
 Requires JWT authentication with admin role.
 """
 
+import asyncio
 from datetime import datetime, timedelta
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
+from fastapi.responses import Response
 from pydantic import BaseModel
 import aiosqlite
 
@@ -18,6 +20,63 @@ router = APIRouter(prefix="/admin", tags=["Admin Dashboard"])
 
 # Database path
 DB_PATH = settings.data_dir.parent / "backend" / "traffic.db"
+
+
+# =============================================================================
+# VIDEO SNAPSHOT FOR ZONE EDITOR
+# =============================================================================
+
+@router.get("/video/snapshot", summary="Get video snapshot for zone editor")
+async def get_admin_video_snapshot(user: UserInfo = Depends(get_current_admin)):
+    """
+    Get a CLEAN snapshot from the video feed for the Zone Editor.
+    This returns a frame WITHOUT detection boxes or zone overlays.
+    Lazy-starts the video worker if not already running.
+    """
+    # Import here to avoid circular imports
+    from app.routers.video import _video_state, start_video_worker
+    
+    # Lazy start: Start worker if not running
+    if not _video_state.running:
+        start_video_worker()
+        # Wait up to 15 seconds for first frame (YOLO models take time to load)
+        for _ in range(150):  # Max 15 seconds (model loading can take 5-10s)
+            await asyncio.sleep(0.1)
+            if _video_state.get_snapshot() is not None:
+                break
+    
+    snapshot = _video_state.get_snapshot()
+    
+    if snapshot is None:
+        raise HTTPException(status_code=503, detail="No snapshot available yet. Video stream starting...")
+    
+    return Response(
+        content=snapshot,
+        media_type="image/jpeg",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+        }
+    )
+
+
+@router.post("/video/snapshot/refresh", summary="Refresh zone editor snapshot")
+async def refresh_admin_video_snapshot(user: UserInfo = Depends(get_current_admin)):
+    """
+    Request a fresh clean snapshot for Zone Editor.
+    Captures the next video frame as a clean image without any overlays.
+    """
+    from app.routers.video import _video_state
+    
+    _video_state.request_new_snapshot()
+    
+    # Wait for new snapshot (max 2 seconds)
+    for _ in range(20):
+        await asyncio.sleep(0.1)
+        if _video_state.raw_frame_captured:
+            break
+    
+    return {"status": "refreshed", "message": "New clean snapshot captured"}
 
 
 # =============================================================================

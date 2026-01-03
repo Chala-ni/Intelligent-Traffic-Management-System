@@ -74,6 +74,38 @@ class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
       });
     }
   }
+  
+  /// Refresh the snapshot - requests a new clean frame from the backend
+  Future<void> _refreshSnapshot() async {
+    if (!mounted) return;
+    
+    setState(() => _isLoadingSnapshot = true);
+    
+    try {
+      // Request a fresh clean snapshot from the backend
+      await _apiClient.post(ApiEndpoints.videoSnapshotRefresh, body: {});
+      
+      // Get auth token for image request
+      final token = await _apiClient.token;
+      
+      if (!mounted) return;
+      
+      setState(() {
+        _authToken = token;
+        // Add timestamp to force reload
+        _snapshotUrl = '${AppConfig.videoBaseUrl}${ApiEndpoints.videoSnapshot}?t=${DateTime.now().millisecondsSinceEpoch}';
+        _isLoadingSnapshot = false;
+      });
+      
+      _showSuccess('Snapshot refreshed');
+    } on UnauthorizedException {
+      _handleUnauthorized();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _isLoadingSnapshot = false);
+      _showError('Failed to refresh snapshot');
+    }
+  }
 
   Future<void> _loadZones() async {
     if (!mounted) return;
@@ -422,7 +454,7 @@ class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
             ),
           ] else ...[
             IconButton(
-              onPressed: _loadVideoSnapshot,
+              onPressed: _refreshSnapshot,
               icon: const Icon(Icons.refresh),
               tooltip: 'Refresh video frame',
             ),
@@ -461,8 +493,22 @@ class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
               onTapDown: _isDrawing ? _handleTap : null,
               child: Stack(
                 children: [
-                  // Background - placeholder for zone drawing
-                  _buildPlaceholderBackground(),
+                  // Background - video snapshot for zone drawing
+                  _isLoadingSnapshot
+                      ? Center(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              CircularProgressIndicator(color: AppColors.primary),
+                              const SizedBox(height: 16),
+                              Text(
+                                'Loading video frame...',
+                                style: AppTypography.bodySmall.copyWith(color: Colors.white54),
+                              ),
+                            ],
+                          ),
+                        )
+                      : _buildSnapshotImage(),
                   
                   // Existing zones
                   ..._buildExistingZones(),
@@ -572,7 +618,7 @@ class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
             ),
             const SizedBox(height: 8),
             TextButton.icon(
-              onPressed: _loadVideoSnapshot,
+              onPressed: _refreshSnapshot,
               icon: const Icon(Icons.refresh, size: 16),
               label: const Text('Retry loading frame'),
               style: TextButton.styleFrom(
@@ -629,13 +675,25 @@ class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
         headers['Authorization'] = 'Bearer $_authToken';
       }
       
+      // Increased timeout to 20s - backend may need time to load YOLO models
       final response = await http.get(
         Uri.parse(_snapshotUrl!),
         headers: headers,
-      ).timeout(const Duration(seconds: 10));
+      ).timeout(const Duration(seconds: 20));
       
       if (response.statusCode == 200) {
         return response.bodyBytes;
+      }
+      // If 503, wait and retry once (models still loading)
+      if (response.statusCode == 503) {
+        await Future.delayed(const Duration(seconds: 3));
+        final retryResponse = await http.get(
+          Uri.parse(_snapshotUrl!),
+          headers: headers,
+        ).timeout(const Duration(seconds: 15));
+        if (retryResponse.statusCode == 200) {
+          return retryResponse.bodyBytes;
+        }
       }
       return null;
     } catch (e) {

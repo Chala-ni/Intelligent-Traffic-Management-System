@@ -207,7 +207,7 @@ class _LiveVideoFeedState extends State<LiveVideoFeed> {
     });
   }
 
-  void _disconnect() {
+  void _disconnect() async {
     debugPrint('[VideoFeed] _disconnect() called');
     
     // FIX: Set user paused flag to prevent auto-reconnect
@@ -231,6 +231,22 @@ class _LiveVideoFeedState extends State<LiveVideoFeed> {
         _currentFrame = null;
       });
     }
+    
+    // CRITICAL: Tell backend to stop video processing
+    try {
+      final response = await http.post(
+        Uri.parse('${AppConfig.videoBaseUrl}/video/stop'),
+      ).timeout(const Duration(seconds: 5));
+      
+      if (response.statusCode == 200) {
+        debugPrint('[VideoFeed] Backend video worker stopped');
+      } else {
+        debugPrint('[VideoFeed] Failed to stop backend: ${response.statusCode}');
+      }
+    } catch (e) {
+      debugPrint('[VideoFeed] Error stopping backend: $e');
+    }
+    
     debugPrint('[VideoFeed] Disconnected, _userPaused=true');
   }
 

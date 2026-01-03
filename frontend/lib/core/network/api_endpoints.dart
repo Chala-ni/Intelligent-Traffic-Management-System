@@ -24,6 +24,7 @@ class ApiEndpoints {
   static const String adminZones = '/admin/zones';
   static const String adminLogs = '/admin/logs';
   static const String videoSnapshot = '/admin/video/snapshot';
+  static const String videoSnapshotRefresh = '/admin/video/snapshot/refresh';
   static const String adminStats = '/admin/stats';
 
   // ============== DRIVER ENDPOINTS ==============
