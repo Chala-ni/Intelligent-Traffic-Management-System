@@ -231,4 +231,27 @@ class AppTypography {
     color: AppColors.textPrimary,
     letterSpacing: 1.5,
   );
+
+  // ============== LABEL STYLES ==============
+
+  /// Label Large - For prominent labels
+  static TextStyle get labelLarge => GoogleFonts.inter(
+    fontSize: 14,
+    fontWeight: FontWeight.w500,
+    color: AppColors.textPrimary,
+  );
+
+  /// Label Medium - For standard labels
+  static TextStyle get labelMedium => GoogleFonts.inter(
+    fontSize: 12,
+    fontWeight: FontWeight.w500,
+    color: AppColors.textPrimary,
+  );
+
+  /// Label Small - For small labels and badges
+  static TextStyle get labelSmall => GoogleFonts.inter(
+    fontSize: 11,
+    fontWeight: FontWeight.w500,
+    color: AppColors.textPrimary,
+  );
 }

@@ -96,13 +96,19 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
       case 2: // Violations
         Navigator.of(context).pushReplacementNamed('/admin/violations');
         break;
-      case 3: // Audit Logs
+      case 3: // Drivers
+        Navigator.of(context).pushReplacementNamed('/admin/drivers');
+        break;
+      case 4: // Analytics
+        Navigator.of(context).pushReplacementNamed('/admin/analytics');
+        break;
+      case 5: // Audit Logs
         Navigator.of(context).pushReplacementNamed('/admin/logs');
         break;
-      case 4: // Settings
+      case 6: // Settings
         Navigator.of(context).pushReplacementNamed('/admin/settings');
         break;
-      case 5: // Logout
+      case 7: // Logout
         _handleLogout();
         break;
     }

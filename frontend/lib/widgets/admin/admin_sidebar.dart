@@ -54,10 +54,20 @@ class AdminSidebar extends StatelessWidget {
                     index: 2,
                     icon: Icons.warning_amber,
                     label: 'Violations',
-                    badge: '3',
+                    badge: '!',
                   ),
                   _buildNavItem(
                     index: 3,
+                    icon: Icons.people,
+                    label: 'Drivers',
+                  ),
+                  _buildNavItem(
+                    index: 4,
+                    icon: Icons.analytics,
+                    label: 'Analytics',
+                  ),
+                  _buildNavItem(
+                    index: 5,
                     icon: Icons.history,
                     label: 'Audit Logs',
                   ),
@@ -68,7 +78,7 @@ class AdminSidebar extends StatelessWidget {
                   ),
                   
                   _buildNavItem(
-                    index: 4,
+                    index: 6,
                     icon: Icons.settings,
                     label: 'Settings',
                   ),

@@ -3,6 +3,9 @@ import 'package:provider/provider.dart';
 
 import 'core/theme/app_theme.dart';
 import 'providers/auth_provider.dart';
+import 'providers/admin/violations_provider.dart';
+import 'providers/admin/drivers_provider.dart';
+import 'providers/admin/analytics_provider.dart';
 import 'screens/screens.dart';
 
 void main() {
@@ -18,6 +21,9 @@ class TrafficControlApp extends StatelessWidget {
     return MultiProvider(
       providers: [
         ChangeNotifierProvider(create: (_) => AuthProvider()),
+        ChangeNotifierProvider(create: (_) => ViolationsProvider()),
+        ChangeNotifierProvider(create: (_) => DriversProvider()),
+        ChangeNotifierProvider(create: (_) => AnalyticsProvider()),
       ],
       child: MaterialApp(
         title: 'Traffic Control System',
@@ -43,9 +49,9 @@ class TrafficControlApp extends StatelessWidget {
       '/admin/dashboard': (context) => const AdminDashboardScreen(),
       '/admin/zones': (context) => const ZoneEditorScreen(),
       '/admin/logs': (context) => const AuditLogScreen(),
-      '/admin/violations': (context) => const _PlaceholderScreen(title: 'Violations'),
-      '/admin/drivers': (context) => const _PlaceholderScreen(title: 'Drivers'),
-      '/admin/analytics': (context) => const _PlaceholderScreen(title: 'Analytics'),
+      '/admin/violations': (context) => const ViolationsListScreen(),
+      '/admin/drivers': (context) => const DriversListScreen(),
+      '/admin/analytics': (context) => const AnalyticsScreen(),
       '/admin/settings': (context) => const _PlaceholderScreen(title: 'Settings'),
       
       // Driver routes (placeholders for now)
