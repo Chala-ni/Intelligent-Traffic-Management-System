@@ -138,20 +138,20 @@ async def get_dashboard_stats(user: UserInfo = Depends(get_current_admin)):
     async with aiosqlite.connect(str(DB_PATH)) as db:
         db.row_factory = aiosqlite.Row
         
-        today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
-        week_ago_start = (datetime.now() - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        today = datetime.now().strftime("%Y-%m-%d")
+        week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
         
-        # Violations today (start_time is stored as REAL timestamp)
+        # Violations today (timestamp is stored as string YYYY-MM-DD HH:MM:SS)
         cursor = await db.execute(
-            "SELECT COUNT(*) as count FROM violations WHERE start_time >= ?",
-            (today_start,)
+            "SELECT COUNT(*) as count FROM violations WHERE timestamp >= ?",
+            (today,)
         )
         violations_today = (await cursor.fetchone())["count"]
         
         # Violations this week
         cursor = await db.execute(
-            "SELECT COUNT(*) as count FROM violations WHERE start_time >= ?",
-            (week_ago_start,)
+            "SELECT COUNT(*) as count FROM violations WHERE timestamp >= ?",
+            (week_ago,)
         )
         violations_week = (await cursor.fetchone())["count"]
         
@@ -174,12 +174,12 @@ async def get_dashboard_stats(user: UserInfo = Depends(get_current_admin)):
         
         if junction_table_exists:
             cursor = await db.execute(
-                """SELECT current_score FROM junction_safety 
+                """SELECT safety_score FROM junction_safety 
                    ORDER BY updated_at DESC LIMIT 1"""
             )
             junction = await cursor.fetchone()
             if junction:
-                current_risk = 100 - junction["current_score"]
+                current_risk = 100 - junction["safety_score"]
                 if current_risk > 70:
                     traffic_level = "high"
                 elif current_risk > 40:
@@ -242,45 +242,34 @@ async def get_all_violations(
         db.row_factory = aiosqlite.Row
         
         # Build query with filters
-        # Actual columns: violation_id, track_id, zone_id, zone_name, zone_type, start_time, end_time, duration_sec, license_plate, snapshot_path, fine_amount, status
-        query = """SELECT violation_id, track_id, zone_id, zone_name, zone_type as violation_type,
-                          start_time, license_plate, snapshot_path, fine_amount, status,
-                          duration_sec
+        # Actual columns in backend/traffic.db: id, driver_id, violation_type, severity, fine_amount, timestamp, location, evidence_path, status
+        query = """SELECT id, driver_id, violation_type, severity, fine_amount,
+                          timestamp, location, evidence_path, status
                    FROM violations WHERE 1=1"""
         params = []
         
         if violation_type:
-            query += " AND zone_type = ?"
+            query += " AND violation_type = ?"
             params.append(violation_type)
         
         if date_from:
-            # Convert date string to timestamp
-            try:
-                from_ts = datetime.strptime(date_from, "%Y-%m-%d").timestamp()
-                query += " AND start_time >= ?"
-                params.append(from_ts)
-            except:
-                pass
+            query += " AND timestamp >= ?"
+            params.append(date_from)
         
         if date_to:
-            # Convert date string to timestamp
-            try:
-                to_ts = datetime.strptime(date_to, "%Y-%m-%d").timestamp() + 86400  # End of day
-                query += " AND start_time <= ?"
-                params.append(to_ts)
-            except:
-                pass
+            query += " AND timestamp <= ?"
+            params.append(date_to + " 23:59:59")
         
         # Get total count
         count_query = f"SELECT COUNT(*) as count FROM violations WHERE 1=1"
         if violation_type:
-            count_query += f" AND zone_type = '{violation_type}'"
+            count_query += f" AND violation_type = '{violation_type}'"
         
         cursor = await db.execute(count_query)
         total = (await cursor.fetchone())["count"]
         
         # Add pagination
-        query += " ORDER BY start_time DESC LIMIT ? OFFSET ?"
+        query += " ORDER BY timestamp DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
         
         cursor = await db.execute(query, params)
@@ -289,16 +278,16 @@ async def get_all_violations(
         return {
             "violations": [
                 {
-                    "violation_id": v["violation_id"],
-                    "driver_id": v["license_plate"],  # Use license_plate as driver_id
-                    "license_plate": v["license_plate"],
+                    "violation_id": str(v["id"]),
+                    "driver_id": v["driver_id"],
+                    "license_plate": v["driver_id"],  # Use driver_id as license plate
                     "violation_type": v["violation_type"],
-                    "timestamp": datetime.fromtimestamp(v["start_time"]).isoformat() if v["start_time"] else None,
-                    "location": v["zone_name"] or "Unknown",
+                    "timestamp": v["timestamp"],
+                    "location": v["location"] or "Unknown",
                     "fine_amount": v["fine_amount"] or 0,
-                    "points_deducted": 0,  # Not stored in violations table
-                    "evidence_path": v["snapshot_path"],
-                    "notes": f"Duration: {v['duration_sec']:.1f}s" if v["duration_sec"] else None,
+                    "points_deducted": 0,
+                    "evidence_path": v["evidence_path"],
+                    "notes": f"Severity: {v['severity']}" if v["severity"] else None,
                     "status": v["status"] or "pending",
                 }
                 for v in violations
@@ -318,13 +307,13 @@ async def get_all_violations(
 async def get_violation_details(
     violation_id: str,
     user: UserInfo = Depends(get_current_admin),
-):
+):  
     """Get detailed information about a specific violation."""
     async with aiosqlite.connect(str(DB_PATH)) as db:
         db.row_factory = aiosqlite.Row
         
         cursor = await db.execute(
-            """SELECT * FROM violations WHERE violation_id = ?""",
+            """SELECT * FROM violations WHERE id = ?""",
             (violation_id,)
         )
         violation = await cursor.fetchone()
@@ -332,21 +321,18 @@ async def get_violation_details(
         if not violation:
             raise HTTPException(status_code=404, detail="Violation not found")
         
-        # Return formatted response matching the actual schema
+        # Return formatted response matching the backend/traffic.db schema
         return {
-            "violation_id": violation["violation_id"],
-            "track_id": violation["track_id"],
-            "driver_id": violation["license_plate"],
-            "license_plate": violation["license_plate"],
-            "violation_type": violation["zone_type"],
-            "zone_name": violation["zone_name"],
-            "timestamp": datetime.fromtimestamp(violation["start_time"]).isoformat() if violation["start_time"] else None,
-            "end_time": datetime.fromtimestamp(violation["end_time"]).isoformat() if violation["end_time"] else None,
-            "duration_sec": violation["duration_sec"],
+            "violation_id": str(violation["id"]),
+            "driver_id": violation["driver_id"],
+            "license_plate": violation["driver_id"],
+            "violation_type": violation["violation_type"],
+            "timestamp": violation["timestamp"],
+            "location": violation["location"] or "Unknown",
             "fine_amount": violation["fine_amount"] or 0,
+            "severity": violation["severity"],
             "status": violation["status"] or "pending",
-            "evidence_path": violation["snapshot_path"],
-            "location": violation["zone_name"] or "Unknown",
+            "evidence_path": violation["evidence_path"],
         }
 
 
@@ -358,7 +344,7 @@ async def delete_violation(
     """Delete a violation record (admin only)."""
     async with aiosqlite.connect(str(DB_PATH)) as db:
         cursor = await db.execute(
-            "DELETE FROM violations WHERE violation_id = ?",
+            "DELETE FROM violations WHERE id = ?",
             (violation_id,)
         )
         await db.commit()
@@ -392,10 +378,13 @@ async def get_all_drivers(
         
         order_dir = "DESC" if order.lower() == "desc" else "ASC"
         
+        # Join with driver_users to get name and phone
         cursor = await db.execute(f"""
-            SELECT driver_id, current_score, total_violations, total_fines, updated_at
-            FROM drivers
-            ORDER BY {sort_by} {order_dir}
+            SELECT d.driver_id, d.current_score, d.total_violations, d.total_fines, d.updated_at,
+                   du.name, du.phone
+            FROM drivers d
+            LEFT JOIN driver_users du ON d.driver_id = du.plate_number
+            ORDER BY d.{sort_by} {order_dir}
             LIMIT ? OFFSET ?
         """, (limit, offset))
         
@@ -408,10 +397,12 @@ async def get_all_drivers(
             "drivers": [
                 {
                     "driver_id": d["driver_id"],
+                    "name": d["name"] or "Unknown Driver",
+                    "phone": d["phone"],
                     "current_score": d["current_score"],
                     "total_violations": d["total_violations"],
                     "total_fines": d["total_fines"],
-                    "last_violation": datetime.fromtimestamp(d["updated_at"]).isoformat() if d["updated_at"] else None,
+                    "last_violation": d["updated_at"] if d["updated_at"] else None,
                     "risk_level": get_risk_level(d["current_score"]),
                 }
                 for d in drivers
@@ -431,9 +422,12 @@ async def get_driver_details(
     async with aiosqlite.connect(str(DB_PATH)) as db:
         db.row_factory = aiosqlite.Row
         
-        # Get driver info
+        # Get driver info with user details
         cursor = await db.execute(
-            "SELECT * FROM drivers WHERE driver_id = ?",
+            """SELECT d.*, du.name, du.phone
+               FROM drivers d
+               LEFT JOIN driver_users du ON d.driver_id = du.plate_number
+               WHERE d.driver_id = ?""",
             (driver_id,)
         )
         driver = await cursor.fetchone()
@@ -441,27 +435,30 @@ async def get_driver_details(
         if not driver:
             raise HTTPException(status_code=404, detail="Driver not found")
         
-        # Get violations - use actual schema columns
+        # Get violations - use actual backend/traffic.db schema
         cursor = await db.execute(
-            """SELECT violation_id, zone_type as violation_type, start_time, fine_amount
-               FROM violations WHERE license_plate = ?
-               ORDER BY start_time DESC LIMIT 20""",
+            """SELECT id, violation_type, timestamp, fine_amount, location
+               FROM violations WHERE driver_id = ?
+               ORDER BY timestamp DESC LIMIT 20""",
             (driver_id,)
         )
         violations = await cursor.fetchall()
         
         return {
             "driver_id": driver["driver_id"],
+            "name": driver["name"] or "Unknown Driver",
+            "phone": driver["phone"],
             "current_score": driver["current_score"],
             "total_violations": driver["total_violations"],
             "total_fines": driver["total_fines"],
-            "last_violation": datetime.fromtimestamp(driver["updated_at"]).isoformat() if driver["updated_at"] else None,
+            "last_violation": driver["updated_at"] if driver["updated_at"] else None,
             "recent_violations": [
                 {
-                    "violation_id": v["violation_id"],
+                    "violation_id": str(v["id"]),
                     "violation_type": v["violation_type"],
-                    "timestamp": datetime.fromtimestamp(v["start_time"]).isoformat() if v["start_time"] else None,
+                    "timestamp": v["timestamp"],
                     "fine_amount": v["fine_amount"] or 0,
+                    "location": v["location"],
                 }
                 for v in violations
             ],

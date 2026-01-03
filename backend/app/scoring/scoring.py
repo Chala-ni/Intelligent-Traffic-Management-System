@@ -4,6 +4,8 @@ Tracks driver behavior, calculates risk scores, and applies violation penalties.
 """
 
 import time
+import sqlite3
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
@@ -12,6 +14,9 @@ from enum import Enum
 from app.config import get_settings
 
 settings = get_settings()
+
+# Database path for persistence
+DB_PATH = Path(__file__).parent.parent.parent / "traffic.db"
 
 
 class ViolationType(str, Enum):
@@ -281,7 +286,58 @@ class ScoringEngine:
             notes=notes,
         )
         
+        # Persist to database
+        self._save_to_database(driver, record)
+        
         return driver, record
+    
+    def _save_to_database(self, driver: DriverScore, violation: ViolationRecord):
+        """
+        Persist driver and violation data to SQLite database.
+        """
+        try:
+            conn = sqlite3.connect(str(DB_PATH))
+            cursor = conn.cursor()
+            
+            # Update or insert driver
+            cursor.execute("""
+                INSERT INTO drivers (driver_id, current_score, total_violations, total_fines, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(driver_id) DO UPDATE SET
+                    current_score = excluded.current_score,
+                    total_violations = excluded.total_violations,
+                    total_fines = excluded.total_fines,
+                    updated_at = excluded.updated_at
+            """, (
+                driver.driver_id,
+                driver.current_score,
+                driver.total_violations,
+                driver.total_fines,
+                datetime.fromtimestamp(driver.created_at).strftime("%Y-%m-%d %H:%M:%S"),
+                datetime.fromtimestamp(driver.updated_at).strftime("%Y-%m-%d %H:%M:%S"),
+            ))
+            
+            # Insert violation record
+            penalty = VIOLATION_PENALTIES.get(violation.violation_type, {"severity": "medium"})
+            cursor.execute("""
+                INSERT INTO violations (driver_id, violation_type, severity, fine_amount, timestamp, location, evidence_path, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                violation.driver_id,
+                violation.violation_type.value,
+                penalty.get("severity", "medium"),
+                violation.fine_amount,
+                datetime.fromtimestamp(violation.timestamp).strftime("%Y-%m-%d %H:%M:%S"),
+                violation.location or "Unknown",
+                violation.snapshot_path,
+                "pending",
+            ))
+            
+            conn.commit()
+            conn.close()
+            
+        except Exception as e:
+            print(f"[SCORING] DB Error: {e}")
     
     def get_driver_score(self, driver_id: str) -> Optional[DriverScore]:
         """Get driver score if exists."""
