@@ -682,7 +682,7 @@ def _apply_parking_penalty(track_id: int, plate_text: str, zone_id: str):
         driver, violation = scoring["engine"].record_violation(
             driver_id=driver_id,
             violation_type=ViolationType.PARKING_NO_PARKING,
-            location=f"Zone: {zone_id}",
+            location=f"zone:{zone_id}",  # Store zone_id for analytics lookup
             license_plate=plate_text,
             notes="Automated detection - illegal parking > 15 seconds",
         )

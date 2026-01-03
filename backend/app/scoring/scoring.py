@@ -299,25 +299,7 @@ class ScoringEngine:
             conn = sqlite3.connect(str(DB_PATH))
             cursor = conn.cursor()
             
-            # Update or insert driver
-            cursor.execute("""
-                INSERT INTO drivers (driver_id, current_score, total_violations, total_fines, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(driver_id) DO UPDATE SET
-                    current_score = excluded.current_score,
-                    total_violations = excluded.total_violations,
-                    total_fines = excluded.total_fines,
-                    updated_at = excluded.updated_at
-            """, (
-                driver.driver_id,
-                driver.current_score,
-                driver.total_violations,
-                driver.total_fines,
-                datetime.fromtimestamp(driver.created_at).strftime("%Y-%m-%d %H:%M:%S"),
-                datetime.fromtimestamp(driver.updated_at).strftime("%Y-%m-%d %H:%M:%S"),
-            ))
-            
-            # Insert violation record
+            # First insert the violation record
             penalty = VIOLATION_PENALTIES.get(violation.violation_type, {"severity": "medium"})
             cursor.execute("""
                 INSERT INTO violations (driver_id, violation_type, severity, fine_amount, timestamp, location, evidence_path, status)
@@ -331,6 +313,41 @@ class ScoringEngine:
                 violation.location or "Unknown",
                 violation.snapshot_path,
                 "pending",
+            ))
+            
+            # Now calculate actual totals from database
+            cursor.execute("""
+                SELECT COUNT(*) as count, COALESCE(SUM(fine_amount), 0) as total_fines
+                FROM violations WHERE driver_id = ?
+            """, (driver.driver_id,))
+            row = cursor.fetchone()
+            actual_violations = row[0] if row else 0
+            actual_fines = row[1] if row else 0.0
+            
+            # Calculate score based on actual violations (10 points per violation, min 0)
+            calculated_score = max(0, 100 - (actual_violations * 10))
+            
+            # Update or insert driver with correct counts
+            cursor.execute("""
+                INSERT INTO drivers (driver_id, current_score, total_violations, total_fines, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(driver_id) DO UPDATE SET
+                    current_score = ?,
+                    total_violations = ?,
+                    total_fines = ?,
+                    updated_at = ?
+            """, (
+                driver.driver_id,
+                calculated_score,
+                actual_violations,
+                actual_fines,
+                datetime.fromtimestamp(driver.created_at).strftime("%Y-%m-%d %H:%M:%S"),
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                # For UPDATE clause
+                calculated_score,
+                actual_violations,
+                actual_fines,
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             ))
             
             conn.commit()

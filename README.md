@@ -1,424 +1,336 @@
-# Intelligent Traffic Management System
+# 🚦 Intelligent Traffic Management System (ITMS)
 
-An AI-powered system designed to reduce traffic congestion and improve road safety by detecting violations, predicting illegal parking, adapting traffic signals, and providing real-time feedback to drivers and authorities.
+An AI-powered system designed to reduce traffic congestion and improve road safety through real-time violation detection, adaptive traffic signals, and driver scoring.
 
-## 🎬 Demo Status - First Evaluation
+---
 
-**Current Implementation:** Backend AI/ML pipeline fully operational with real-time detection  
-**Status:** ✅ Ready for demonstration  
-**Last Updated:** December 12, 2025
+## 📋 Table of Contents
 
-### ✅ Completed Features
+- [Overview](#-overview)
+- [Current Progress](#-current-progress)
+- [Prerequisites](#-prerequisites)
+- [Setup Instructions](#-setup-instructions)
+  - [Step 1: Backend Setup](#step-1-backend-setup)
+  - [Step 2: Frontend Setup (Web)](#step-2-frontend-setup-web)
+  - [Step 3: Mobile App Setup (Optional)](#step-3-mobile-app-setup-optional)
+- [Running the System](#-running-the-system)
+- [Troubleshooting](#-troubleshooting)
+- [Team Members](#-team-members)
 
-- **🚗 Vehicle Detection & Tracking** - YOLOv8n with object persistence across frames
-- **🔍 License Plate Detection** - Custom-trained YOLOv8 model (best_plate.pt) on 281 Sri Lankan plate images
-- **📝 OCR Integration** - EasyOCR with preprocessing pipeline, geometric filtering, and regex validation for Sri Lankan plates
-- **🅿️ Parking Zone Monitoring** - Configurable no-parking zones with warning (3s) and violation (8s) detection (demo sensitivity)
-- **⚡ Speeding Detection** - Real-time speed estimation (demo threshold: 60 km/h / ~120 px/s) - alerts and penalties
-- **📊 Driver Scoring System** - 100-point scoring with violation tracking and dynamic fines
-- **🚦 Fuzzy Logic Traffic Controller** - Adaptive signal timing based on vehicle density
-- **🔊 Voice Warnings (TTS)** - edge-tts + pyttsx3 fallback for audio alerts
-- **📡 Real-time Event Stream** - Server-Sent Events (SSE) for live dashboard updates
+---
 
-## 🏗️ Architecture
+## 🎯 Overview
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                      INTELLIGENT TRAFFIC SYSTEM                          │
-├─────────────────────────────────────────────────────────────────────────┤
-│  Video Ingestion ──► YOLOv8 Detection ──► Object Tracking               │
-│        │                    │                    │                       │
-│        ▼                    ▼                    ▼                       │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐              │
-│  │ Plate Model  │    │   Parking    │    │   Traffic    │              │
-│  │ (best_plate) │    │  Violations  │    │  Violations  │              │
-│  └──────────────┘    └──────────────┘    └──────────────┘              │
-│        │                    │                    │                       │
-│        └────────────────────┼────────────────────┘                       │
-│                             ▼                                            │
-│                    ┌──────────────────┐                                 │
-│                    │  Driver Scoring  │                                 │
-│                    │  & Dynamic Fines │                                 │
-│                    └────────┬─────────┘                                 │
-│                             │                                            │
-│              ┌──────────────┼──────────────┐                            │
-│              ▼              ▼              ▼                            │
-│         SQLite DB      SSE Events    Wokwi Signals                      │
-│              │              │              │                            │
-│              └──────────────┼──────────────┘                            │
-│                             ▼                                            │
-│                    ┌──────────────────┐                                 │
-│                    │  Flutter Web &   │                                 │
-│                    │   Mobile App     │                                 │
-│                    └──────────────────┘                                 │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+**Version:** 1.0 (First Evaluation)  
+**Date:** January 3, 2026  
+
+This project demonstrates an intelligent traffic management system with:
+- Real-time vehicle detection using YOLOv8
+- License plate recognition with custom-trained models
+- Parking and speeding violation detection
+- Driver scoring system (LiveSafe Score)
+- Adaptive traffic signals using fuzzy logic
+- Admin dashboard for monitoring
+
+---
+
+## 📊 Current Progress
+
+### ✅ Completed (Backend)
+
+| Feature | Description | Status |
+|---------|-------------|--------|
+| 🚗 Vehicle Detection | YOLOv8n with DeepSORT tracking | ✅ Complete |
+| 🔍 License Plate Detection | Custom YOLOv8 model (281 Sri Lankan plates) | ✅ Complete |
+| 📝 OCR Integration | EasyOCR with preprocessing pipeline | ✅ Complete |
+| 🅿️ Parking Violations | No-parking zone monitoring with warnings | ✅ Complete |
+| ⚡ Speed Detection | Real-time speed estimation | ✅ Complete |
+| 📊 Driver Scoring | 100-point LiveSafe Score system | ✅ Complete |
+| 🚦 Traffic Signals | Fuzzy logic adaptive timing | ✅ Complete |
+| 🔊 Voice Warnings | edge-tts + pyttsx3 audio alerts | ✅ Complete |
+| 🚨 Emergency Mode | Admin-triggered emergency override | ✅ Complete |
+
+### 🔄 In Progress (Frontend)
+
+| Feature | Description | Status |
+|---------|-------------|--------|
+| 📺 Live Video Feed | Real-time detection display | ✅ Complete |
+| 🚦 Traffic Light Panel | 4-way signal visualization | ✅ Complete |
+| 🗺️ Zone Editor | Draw no-parking zones on map | ✅ Complete |
+| 🚨 Emergency Button | Trigger emergency mode | ✅ Complete |
+| 📋 Violations List | View and manage violations | 🔄 In Progress |
+| 👥 Drivers List | View driver scores | 🔄 In Progress |
+| 📈 Analytics | Charts and trends | 🔄 In Progress |
+
+### 🔄 In Progress (Mobile App)
+
+| Feature | Description | Status |
+|---------|-------------|--------|
+| 🔐 Authentication | Driver login with phone + plate | ✅ Complete |
+| 📊 Dashboard | Score and violations | 🔄 In Progress |
+| 💳 Payments | Fine payments | 📅 Planned |
+
+---
 
 ## 📋 Prerequisites
 
-- **Python 3.11+** (Required)
-- **Git** (Required)
-- **Webcam or Video File** (For testing)
-- **Windows OS** (Current setup optimized for Windows PowerShell)
+### For Backend
+| Requirement | Version | Notes |
+|-------------|---------|-------|
+| **Python** | 3.11 or 3.12 | Required |
+| **Windows** | 10 or 11 | PowerShell recommended |
 
-## 🛠️ Setup Instructions for Demonstration
+### For Frontend (Web)
+| Requirement | Version | Notes |
+|-------------|---------|-------|
+| **Flutter SDK** | 3.16+ | With Dart 3.2+ |
+| **Chrome** | Latest | For web development |
 
-### Step 1: Create Virtual Environment
+### For Mobile App (Android) ⚠️ IMPORTANT
+| Requirement | Version | Notes |
+|-------------|---------|-------|
+| **Flutter SDK** | 3.16+ | With Dart 3.2+ |
+| **Android Studio** | 2023.1+ | Required for SDK tools |
+| **Android SDK** | API Level 34 | Required |
+| **Android NDK** | **23.1.7779620** | ⚠️ **EXACT VERSION** |
+| **Java** | 17 | Bundled with Android Studio |
 
-Open PowerShell in the project directory and run:
+---
 
+## 📦 Setup Instructions
+
+> **Note:** This project is provided as a ZIP file. Extract it to `D:\Intelligent-Traffic-Management-System\`
+
+---
+
+### Step 1: Backend Setup
+
+Open **PowerShell** and follow these steps:
+
+#### 1.1 Navigate to Project
 ```powershell
-# Navigate to project root
 cd D:\Intelligent-Traffic-Management-System
+```
 
-# Create Python virtual environment
+#### 1.2 Create Virtual Environment
+```powershell
 python -m venv .venv
+```
 
-# Activate virtual environment
+#### 1.3 Activate Virtual Environment
+```powershell
 .\.venv\Scripts\Activate.ps1
+```
 
-# Upgrade pip to latest version
+✅ **Success:** You should see `(.venv)` prefix in your terminal
+
+#### 1.4 Upgrade pip
+```powershell
 python -m pip install --upgrade pip
 ```
 
-**Expected Output:** You should see `(.venv)` prefix in your terminal prompt
+#### 1.5 Install Backend Dependencies
+```powershell
+cd backend
+pip install -r requirements.txt
+```
 
----
+**⏱️ Duration:** 2-3 minutes
 
-### Step 2: Install Python Dependencies
+#### 1.6 Install PyTorch (CPU Version)
+
+> ⚠️ **IMPORTANT:** Run this command SEPARATELY after requirements.txt
 
 ```powershell
-# Navigate to backend folder
-cd backend
-
-# Install all requirements
-pip install -r requirements.txt
-
-# Install PyTorch CPU version (no NVIDIA GPU needed)
 pip install torch==2.2.0+cpu torchvision==0.17.0+cpu --index-url https://download.pytorch.org/whl/cpu
 ```
 
-**Expected Duration:** 3-5 minutes depending on internet speed  
-**Expected Output:** All packages installed successfully with no errors
+**⏱️ Duration:** 3-5 minutes (large download ~200MB)
 
----
-
-### Step 3: Verify Installation
-
-Run the verification script to check if all components are ready:
-
+#### 1.7 Verify Installation
 ```powershell
-# From backend folder
 python check_db.py
 ```
 
-**Expected Output:**
-- ✅ Database status check
-- ✅ TTS warnings folder verification
-- ✅ 5 audio files found (parking warnings, speeding alerts)
-- ℹ️ Note: Database file will auto-create when first violation is detected
+✅ **Expected Output:**
+```
+✅ Database connection OK
+✅ TTS warnings folder found
+✅ 5 audio files ready
+```
 
 ---
 
-### Step 4: Start the Backend Server
+### Step 2: Frontend Setup (Web)
 
+#### 2.1 Install Flutter SDK
+
+1. Download Flutter from: https://docs.flutter.dev/get-started/install/windows
+2. Extract to `C:\flutter`
+3. Add `C:\flutter\bin` to your system PATH
+
+#### 2.2 Verify Flutter Installation
 ```powershell
-# Make sure you're in the backend folder with venv activated
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+flutter --version
 ```
 
-**Expected Output:**
-```
-INFO:     Uvicorn running on http://127.0.0.1:8000
-INFO:     Application startup complete
-🔤 Initializing EasyOCR reader (English)...
-✅ EasyOCR initialized successfully
-```
+✅ **Expected:** `Flutter 3.16.x • Dart 3.2.x`
 
-**Server is now running!** Keep this terminal open.
+#### 2.3 Install Flutter Dependencies
+```powershell
+cd D:\Intelligent-Traffic-Management-System\frontend
+flutter pub get
+```
 
 ---
 
-### Step 5: Test the Detection System (Easiest Method)
+### Step 3: Mobile App Setup (Optional)
 
-**🌐 Option A: Web Browser (Recommended for Demo)**
+> ⚠️ Only needed if you want to run the mobile app on Android
 
-With the server running, simply open your browser and navigate to:
+#### 3.1 Install Android Studio
 
-**Live Detection Stream:**  
-🎥 **http://127.0.0.1:8000/detect**
+1. Download from: https://developer.android.com/studio
+2. Install and complete the setup wizard
 
-This will show:
-- Real-time video stream with detection overlay
-- All vehicles tracked with bounding boxes
-- License plates detected and highlighted
-- Speed and parking violations displayed
-- All processing happens in the browser!
+#### 3.2 Install Required SDK Components
 
-**Traffic Simulation Dashboard:**  
-🚦 **http://127.0.0.1:8000/simulation** (if available)
+1. Open **Android Studio** → **File** → **Settings**
+2. Go to **Languages & Frameworks** → **Android SDK**
+3. **SDK Platforms** tab:
+   - ✅ Check **Android 14.0 (API 34)**
+4. **SDK Tools** tab:
+   - ✅ Click **Show Package Details** (bottom right)
+   - ✅ Expand **NDK (Side by side)**
+   - ✅ Select exactly **23.1.7779620**
+   - ✅ Check **Android SDK Build-Tools 34.0.0**
+5. Click **Apply** and wait for installation
+
+#### 3.3 Accept Licenses
+```powershell
+flutter doctor --android-licenses
+# Press 'y' for all prompts
+```
 
 ---
 
-**🖥️ Option B: Command Line (Advanced Testing)**
+## 🚀 Running the System
 
-Open a **new PowerShell terminal** (keep server running) and activate venv:
+### Full Stack (Backend + Frontend)
 
+**Terminal 1 - Start Backend:**
 ```powershell
 cd D:\Intelligent-Traffic-Management-System
 .\.venv\Scripts\Activate.ps1
 cd backend
-
-# Test with webcam (real-time)
-python -m app.detection.yolo_detector
-
-# OR test with a video file
-python -m app.detection.yolo_detector --source path\to\your\video.mp4
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-**Expected Behavior:**
-- OpenCV window opens showing live video feed
-- Vehicles detected with bounding boxes and IDs
-- License plates detected and cropped
-- OCR reads plate numbers (cached for 2 seconds per plate)
-- Parking violations triggered after 15 seconds in no-parking zones
-- Speed violations triggered above 80 km/h (or 150 px/s in video)
-- Voice warnings play automatically via speakers
-- Console shows detailed logs: `[TRACK]`, `[PLATE]`, `[OCR]`, `[AUDIO]`, `[SIGNAL]`
+✅ **Success:** `Uvicorn running on http://0.0.0.0:8000`
+
+**Terminal 2 - Start Frontend (new PowerShell window):**
+```powershell
+cd D:\Intelligent-Traffic-Management-System\frontend
+flutter run -d chrome --web-port 8080
+```
+
+✅ **Success:** Admin dashboard opens at http://localhost:8080
+
+### Run Mobile App (Optional)
+```powershell
+cd D:\Intelligent-Traffic-Management-System\frontend
+flutter run
+```
+
+Select your Android device when prompted.
 
 ---
 
-### Step 6: Access the API Documentation
+### 📍 Access Points
 
-While server is running, open your browser:
+| URL | Description |
+|-----|-------------|
+| http://localhost:8080 | 🖥️ Admin Dashboard |
+| http://localhost:8000/docs | 📡 API Documentation |
+| http://localhost:8000/detect | 🎥 Live Detection Stream |
 
-**Swagger UI:** http://127.0.0.1:8000/docs  
-**ReDoc:** http://127.0.0.1:8000/redoc
+### 🔐 Default Admin Login
 
-**Key Endpoints for Demo:**
-- `GET /` - Welcome message
-- `GET /detect` - 🎥 **Live video detection stream** (easiest way to demo!)
-- `GET /simulation` - 🚦 Traffic simulation dashboard
-- `GET /health` - System health check
-- `GET /version` - Version and configuration info
-- `GET /events` - Server-Sent Events stream (real-time updates)
-- `POST /pipeline/start` - Start detection pipeline
-- `POST /pipeline/stop` - Stop detection pipeline
-- `GET /pipeline/status` - Current pipeline status
-
-## 📁 Project Structure
-
-```
-Intelligent-Traffic-Management-System/
-├── backend/
-│   ├── app/
-│   │   ├── main.py                    # FastAPI application entry point
-│   │   ├── config.py                  # Configuration settings
-│   │   ├── detection/
-│   │   │   └── yolo_detector.py       # ⭐ Main detection engine (1244 lines)
-│   │   ├── services/
-│   │   │   └── ocr_service.py         # EasyOCR with preprocessing pipeline
-│   │   ├── tts/
-│   │   │   ├── tts_service.py         # Voice warning system
-│   │   │   └── warnings/              # Generated audio files
-│   │   ├── fuzzy/                     # Fuzzy logic traffic signal controller
-│   │   ├── scoring/                   # Driver scoring & violation tracking
-│   │   ├── parking/                   # Parking zone logic
-│   │   ├── tracking/                  # Object tracking utilities
-│   │   ├── wokwi/                     # Arduino simulation bridge
-│   │   ├── db/                        # Database models
-│   │   └── ingest/                    # Video ingestion utilities
-│   ├── check_db.py                    # ⭐ Verification script
-│   └── requirements.txt               # Python dependencies
-├── models/
-│   ├── yolov8n.pt                     # Vehicle detection model
-│   └── best_plate.pt                  # ⭐ Custom-trained license plate model
-├── data/
-│   ├── videos/                        # Test video files
-│   └── plates/                        # Training dataset (281 images)
-├── plan/                              # Project documentation
-└── README.md                          # This file
-```
-
-## 🎯 What to Expect During Demo
-
-### Console Output
-
-When running detection, you'll see real-time logs:
-
-```
-[TRACK] Vehicle ID 3 (car) at (450, 320)
-[PLATE] Detected plate for vehicle 3 - size: (120, 45)
-[OCR] Reading plate from vehicle 3...
-[OCR] ✓ "CAA-1234" (Cached for 2.0s)
-[AUDIO] ♪ Playing: warnings\parking_zone_warning.mp3
-[PARKING] Vehicle 3 in NO-PARKING zone for 5.2s (WARNING)
-[SIGNAL] 🚦 Green: 45.0s | Density: 12 vehicles
-[SPEED] Vehicle 7 speeding: 165.3 px/s (threshold: 150.0)
-[AUDIO] ♪ Playing: warnings\speeding_violation.mp3
-[PARKING] Vehicle 3 in NO-PARKING zone for 15.8s (VIOLATION)
-```
-
-### Video Window
-
-- **Green boxes:** Tracked vehicles with IDs
-- **Yellow boxes:** Detected license plates
-- **Red zones:** No-parking areas (if configured)
-- **Speed indicators:** Displayed on fast-moving vehicles
-- **FPS counter:** Shows processing speed
-
-### Audio Warnings
-
-The system automatically plays voice warnings:
-1. **"Warning: Vehicle detected in no parking zone"** - After 5 seconds
-2. **"Parking violation detected"** - After 15 seconds
-3. **"Speed violation detected"** - When exceeding 80 km/h
-4. **Emergency alerts** - For critical violations
-
-### Performance Metrics
-
-- **Detection FPS:** 15-30 fps (depends on CPU)
-- **OCR Processing:** ~500ms per plate (first read), then cached
-- **Frame Skip:** Every 2nd frame processed to maintain speed
-- **Tracking:** Persistent IDs across frames even when occluded
+- **Username:** `admin`
+- **Password:** `admin123`
 
 ---
 
-## 🧠 AI Models
+## 🔧 Troubleshooting
 
-| Model | Purpose | Training | File | Accuracy |
-|-------|---------|----------|------|----------|
-| YOLOv8n | Vehicle Detection | COCO pre-trained | `yolov8n.pt` | 95%+ |
-| YOLOv8 Custom | License Plate Detection | 281 Sri Lankan plates (50 epochs) | `best_plate.pt` | 87% mAP@50 |
-| EasyOCR | Text Recognition | Pre-trained English | Built-in | 85%+ (with filtering) |
+### ❌ First Flutter Build Fails
 
----
+If the first `flutter run` fails, clean and rebuild:
 
-## 📊 Tech Stack
-
-| Layer | Technology | Purpose |
-|-------|-----------|---------|
-| **Backend** | FastAPI, Python 3.11 | REST API & WebSocket server |
-| **AI/ML** | YOLOv8, OpenCV, EasyOCR | Computer vision pipeline |
-| **Detection** | Ultralytics YOLO | Two-stage object detection |
-| **OCR** | EasyOCR | License plate text recognition |
-| **Control** | scikit-fuzzy | Fuzzy logic signal controller |
-| **TTS** | edge-tts + pyttsx3 | Voice warning synthesis |
-| **Database** | SQLite + aiosqlite | Local-first violation storage |
-| **Real-time** | SSE (Server-Sent Events) | Live dashboard updates |
-| **Hardware Sim** | Wokwi Arduino | Traffic light prototype |
-
----
-
-## 🎮 Keyboard Controls (During Detection)
-
-When the OpenCV window is active:
-
-- **`Q`** - Quit detection and close window
-- **`P`** - Pause/Resume video processing
-- **`S`** - Save current frame as screenshot
-- **`Space`** - Advance one frame (when paused)
-
----
-
-## 🔧 Configuration
-
-Key settings in [backend/app/config.py](backend/app/config.py):
-
-```python
-DETECTION_CONFIDENCE = 0.5      # YOLO confidence threshold
-FRAME_SKIP = 2                  # Process every Nth frame
-PARKING_WARNING_TIME = 5        # Seconds before warning
-PARKING_VIOLATION_TIME = 15     # Seconds before fine
-SPEED_THRESHOLD_KMH = 80        # Speed limit in km/h
-OCR_CACHE_DURATION = 2.0        # Cache plate reads (seconds)
+```powershell
+cd D:\Intelligent-Traffic-Management-System\frontend
+flutter clean
+flutter pub get
+flutter run -d chrome --web-port 8080
 ```
 
-You can override these via environment variables or `.env` file.
+### ❌ "flutter pub get" Fails
 
-## ⚠️ Troubleshooting
+```powershell
+Remove-Item pubspec.lock
+flutter pub get
+```
 
-### Issue: "EasyOCR not installed"
+### ❌ Backend Errors
+
+**"Torch not found" or CUDA errors:**
+```powershell
+cd D:\Intelligent-Traffic-Management-System\backend
+pip uninstall torch torchvision -y
+pip install torch==2.2.0+cpu torchvision==0.17.0+cpu --index-url https://download.pytorch.org/whl/cpu
+```
+
+**"EasyOCR not installed":**
 ```powershell
 pip install easyocr==1.7.1
 ```
 
-### Issue: "Torch not found" or CUDA errors
+### ❌ Android Build Fails
+
+**"NDK not found":**
+1. Open **Android Studio** → **SDK Manager** → **SDK Tools**
+2. Check **Show Package Details**
+3. Install exactly **NDK 23.1.7779620**
+
+**"Gradle build failed":**
 ```powershell
-pip install torch==2.2.0+cpu torchvision==0.17.0+cpu --index-url https://download.pytorch.org/whl/cpu
+cd D:\Intelligent-Traffic-Management-System\frontend\android
+.\gradlew clean
+cd ..
+flutter clean
+flutter pub get
+flutter run
 ```
 
-### Issue: No audio warnings
-- Check if `backend/app/tts/warnings/` folder has `.mp3` files
-- Run `python check_db.py` to verify TTS setup
-- Ensure speakers/volume are enabled
+### ❌ Port Already in Use
 
-### Issue: Low FPS / Slow detection
-- Increase `FRAME_SKIP` to 3 or 4 in config.py
-- Close other applications to free CPU/RAM
-- Use lower resolution video (480p instead of 1080p)
-
-### Issue: Webcam not detected
 ```powershell
-# List available cameras
-python -c "import cv2; print([i for i in range(10) if cv2.VideoCapture(i).isOpened()])"
+# Kill process using port 8000
+Get-Process -Id (Get-NetTCPConnection -LocalPort 8000).OwningProcess | Stop-Process -Force
 ```
 
 ---
 
-## 📝 Notes for Evaluators
+## 👥 Team Members
 
-### Demo Highlights
-
-1. **Two-Stage Detection:** First detects vehicles → then crops and detects plates on vehicles only (not background plates)
-2. **Smart Caching:** OCR results cached for 2 seconds to avoid redundant processing
-3. **Configurable Zones:** Parking zones defined in code, easily customizable
-4. **Offline Capable:** All processing runs locally, no cloud dependencies
-5. **Real-time Performance:** Frame skipping and optimizations maintain 20+ FPS
-
-### Known Limitations
-
-- OCR accuracy depends on plate clarity and angle (~85% success rate)
-- Speed estimation is pixel-based (requires calibration for real-world accuracy)
-- Database persistence occurs only when violations are recorded
-- Currently optimized for Sri Lankan license plate format (regex: `[A-Z]{2,3}-\d{4}`)
-
-### Future Enhancements
-
-- GPS integration for real-world location tracking
-- Cloud storage for violation records
-- Mobile app for driver notifications
-- Multi-lane support with lane detection
-- Night vision mode with infrared support
+| ID | Focus Area |
+|----|------------|
+| IT22900890 | Parking Detection, License Plate OCR |
+| IT22337580 | Lane Safety, Driver Scoring System |
+| IT22925572 | Traffic Signals, Fuzzy Logic Controller |
+| IT22363848 | Speed Detection, Risk Prediction |
 
 ---
 
-## 📜 License
-
-This project is for educational purposes as part of an academic evaluation.
-
-## 👥 Team
-
-See [plan/](plan/) folder for team details and proposal presentation.
-
----
-
-## 📞 Quic/ URL | Purpose |
-|---------|---------|
-| `.\.venv\Scripts\Activate.ps1` | Activate virtual environment |
-| `pip install -r backend/requirements.txt` | Install dependencies |
-| `python backend/check_db.py` | Verify system setup |
-| `uvicorn app.main:app --reload --host 127.0.0.1 --port 8000` | Start API server |
-| **`http://127.0.0.1:8000/detect`** | **🎥 Live detection in browser (EASIEST!)** |
-| **`http://127.0.0.1:8000/simulation`** | **🚦 Traffic simulation dashboard** |
-| `http://127.0.0.1:8000/docs` | API documentation |
-| `python -m app.detection.yolo_detector` | Run detection via command line |
-
-**For Demo:** Just run steps 1-4 from setup, then open `http://127.0.0.1:8000/detect` in your browser
-
-**For Demo:** Just run steps 1-4 from setup, then step 5 to see the system in action!
-
----
-
-**Last Updated:** December 12, 2025  
-**Version:** 1.0 (First Evaluation Build)
+**Version:** 1.0 (First Evaluation)  
+**Date:** January 3, 2026

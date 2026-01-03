@@ -5,8 +5,8 @@ class AppConfig {
   // ============== API CONFIGURATION ==============
   
   /// Base URL for the FastAPI backend (data APIs)
-  /// Change this to your server IP in production
-  static const String apiBaseUrl = 'http://127.0.0.1:8000';
+  /// Using localhost to match the frontend origin for CORS
+  static const String apiBaseUrl = 'http://localhost:8000';
   
   /// Base URL for video-related endpoints
   /// Uses 'localhost' instead of '127.0.0.1' to bypass browser's 6-connection limit

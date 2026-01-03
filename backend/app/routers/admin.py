@@ -14,6 +14,7 @@ import aiosqlite
 
 from app.config import get_settings
 from app.routers.auth import get_current_admin, UserInfo
+from app.fuzzy.traffic_controller import get_four_way_controller
 
 settings = get_settings()
 router = APIRouter(prefix="/admin", tags=["Admin Dashboard"])
@@ -471,15 +472,23 @@ async def get_driver_details(
 
 @router.post("/emergency/trigger", response_model=EmergencyResponse, summary="Trigger emergency mode")
 async def trigger_emergency(
-    user: UserInfo = Depends(get_current_admin),
     junction_id: str = Query(default="main", description="Junction to trigger emergency for"),
     emergency_type: str = Query(default="ambulance", description="Type: ambulance, fire, police"),
+    lane: str = Query(default="north", description="Lane to force GREEN"),
 ):
     """
     Trigger emergency mode for a junction.
     This simulates an ambulance/emergency vehicle approach.
     All signals will be set to allow emergency vehicle passage.
     """
+    # Activate emergency mode on the traffic controller
+    controller = get_four_way_controller()
+    if controller:
+        controller.activate_emergency_mode(lane=lane)
+        print(f"[ADMIN] 🚑 Emergency mode activated - Lane: {lane}")
+    else:
+        print(f"[ADMIN] ⚠️ Traffic controller not available for emergency mode")
+    
     async with aiosqlite.connect(str(DB_PATH)) as db:
         # Create emergency_status table if not exists
         await db.execute("""
@@ -498,7 +507,7 @@ async def trigger_emergency(
         await db.execute(
             """INSERT INTO emergency_status (junction_id, emergency_type, triggered_by)
                VALUES (?, ?, ?)""",
-            (junction_id, emergency_type, user.phone)
+            (junction_id, emergency_type, "admin")
         )
         await db.commit()
     
@@ -516,6 +525,12 @@ async def clear_emergency(
     junction_id: str = Query(default="main"),
 ):
     """Clear emergency mode and return to normal operation."""
+    # Deactivate emergency mode on the traffic controller
+    controller = get_four_way_controller()
+    if controller:
+        controller.deactivate_emergency_mode()
+        print(f"[ADMIN] ✅ Emergency mode deactivated by {user.identifier}")
+    
     async with aiosqlite.connect(str(DB_PATH)) as db:
         await db.execute(
             """UPDATE emergency_status 
