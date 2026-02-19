@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "YOUR_PROJECT_NUMBER",
+    "project_id": "itms-traffic-management",
+    "storage_bucket": "itms-traffic-management.appspot.com"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:000000000000:android:YOUR_APP_ID",
+        "android_client_info": {
+          "package_name": "com.itms.traffic_control_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "YOUR_API_KEY_HERE"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1",
+  "_README": "PLACEHOLDER FILE - Replace this with your actual google-services.json from Firebase Console. Go to https://console.firebase.google.com → Create/select project → Add Android app with package name 'com.itms.traffic_control_app' → Download google-services.json → Replace this file."
+}

@@ -8,15 +8,13 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Query, Depends, HTTPException, Body
 from pydantic import BaseModel
-import aiosqlite
+from google.cloud.firestore_v1 import FieldFilter
 
 from app.config import get_settings
+from app.db.firestore_client import get_db, Collections
 
 settings = get_settings()
 router = APIRouter(prefix="/community", tags=["Community"])
-
-# Database path
-DB_PATH = settings.data_dir.parent / "backend" / "traffic.db"
 
 
 # =============================================================================
@@ -101,99 +99,71 @@ async def get_junction_score(
     - 30-49: Poor (high risk)
     - 0-29: Critical (avoid if possible)
     """
-    async with aiosqlite.connect(str(DB_PATH)) as db:
-        db.row_factory = aiosqlite.Row
-        
-        # Check if junction_safety table exists
-        cursor = await db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='junction_safety'"
-        )
-        table_exists = await cursor.fetchone()
-        
-        current_score = 85  # Default score
-        traffic_level = "moderate"
-        updated_at = datetime.now().isoformat()
-        
-        if table_exists:
-            cursor = await db.execute(
-                """SELECT current_score, traffic_density, updated_at 
-                   FROM junction_safety 
-                   WHERE junction_id = ?
-                   ORDER BY updated_at DESC LIMIT 1""",
-                (junction_id,)
-            )
-            result = await cursor.fetchone()
-            if result:
-                current_score = result["current_score"]
-                traffic_level = get_traffic_level(result["traffic_density"] or 0.5)
-                updated_at = result["updated_at"]
-        
-        # Count active alerts
-        cursor = await db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='community_alerts'"
-        )
-        alerts_table_exists = await cursor.fetchone()
-        
-        active_alerts = 0
-        if alerts_table_exists:
-            cursor = await db.execute(
-                """SELECT COUNT(*) as count FROM community_alerts 
-                   WHERE junction_id = ? AND (expires_at IS NULL OR expires_at > ?)""",
-                (junction_id, datetime.now().isoformat())
-            )
-            active_alerts = (await cursor.fetchone())["count"]
-        
-        return JunctionScore(
-            junction_id=junction_id,
-            junction_name=f"Junction {junction_id.upper()}",
-            current_score=current_score,
-            risk_level=get_risk_level(current_score),
-            last_updated=updated_at,
-            active_alerts=active_alerts,
-            traffic_level=traffic_level,
-        )
+    db = get_db()
+
+    current_score = 85
+    traffic_level = "moderate"
+    updated_at = datetime.now().isoformat()
+
+    # Get latest junction safety data
+    q = db.collection(Collections.JUNCTION_SAFETY).where(
+        filter=FieldFilter("junction_id", "==", junction_id)
+    ).order_by("updated_at", direction="DESCENDING").limit(1)
+    async for doc in q.stream():
+        result = doc.to_dict()
+        current_score = result.get("current_score", 85)
+        traffic_level = get_traffic_level(result.get("traffic_density", 0.5))
+        updated_at = result.get("updated_at", updated_at)
+
+    # Count active alerts
+    active_alerts = 0
+    now_iso = datetime.now().isoformat()
+    aq = db.collection(Collections.COMMUNITY_ALERTS).where(
+        filter=FieldFilter("junction_id", "==", junction_id)
+    )
+    async for doc in aq.stream():
+        a = doc.to_dict()
+        exp = a.get("expires_at")
+        if exp is None or exp > now_iso:
+            active_alerts += 1
+
+    return JunctionScore(
+        junction_id=junction_id,
+        junction_name=f"Junction {junction_id.upper()}",
+        current_score=current_score,
+        risk_level=get_risk_level(current_score),
+        last_updated=updated_at,
+        active_alerts=active_alerts,
+        traffic_level=traffic_level,
+    )
 
 
 @router.get("/junction-scores", summary="Get all junction scores")
 async def get_all_junction_scores():
     """Get safety scores for all monitored junctions."""
-    async with aiosqlite.connect(str(DB_PATH)) as db:
-        db.row_factory = aiosqlite.Row
-        
-        cursor = await db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='junction_safety'"
-        )
-        table_exists = await cursor.fetchone()
-        
-        junctions = []
-        
-        if table_exists:
-            cursor = await db.execute(
-                """SELECT junction_id, current_score, traffic_density, updated_at 
-                   FROM junction_safety"""
-            )
-            rows = await cursor.fetchall()
-            
-            for row in rows:
-                junctions.append({
-                    "junction_id": row["junction_id"],
-                    "current_score": row["current_score"],
-                    "risk_level": get_risk_level(row["current_score"]),
-                    "traffic_level": get_traffic_level(row["traffic_density"] or 0.5),
-                    "last_updated": row["updated_at"],
-                })
-        
-        # Add default if no junctions found
-        if not junctions:
-            junctions.append({
-                "junction_id": "main",
-                "current_score": 85,
-                "risk_level": "good",
-                "traffic_level": "moderate",
-                "last_updated": datetime.now().isoformat(),
-            })
-        
-        return {"junctions": junctions}
+    db = get_db()
+
+    junctions = []
+    async for doc in db.collection(Collections.JUNCTION_SAFETY).stream():
+        row = doc.to_dict()
+        junctions.append({
+            "junction_id": row.get("junction_id", doc.id),
+            "current_score": row.get("current_score", 85),
+            "risk_level": get_risk_level(row.get("current_score", 85)),
+            "traffic_level": get_traffic_level(row.get("traffic_density", 0.5)),
+            "last_updated": row.get("updated_at", datetime.now().isoformat()),
+        })
+
+    if not junctions:
+        junctions.append({
+            "junction_id": "main",
+            "current_score": 85,
+            "risk_level": "good",
+            "traffic_level": "moderate",
+            "last_updated": datetime.now().isoformat(),
+        })
+
+    return {"junctions": junctions}
 
 
 # =============================================================================
@@ -216,78 +186,64 @@ async def get_community_alerts(
     - congestion: Traffic congestion warning
     - accident: Accident reported
     """
-    async with aiosqlite.connect(str(DB_PATH)) as db:
-        db.row_factory = aiosqlite.Row
-        
-        # Check if community_alerts table exists
-        cursor = await db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='community_alerts'"
-        )
-        table_exists = await cursor.fetchone()
-        
-        alerts = []
-        
-        if table_exists:
-            query = """SELECT id, alert_type, severity, message, junction_id, timestamp, expires_at
-                       FROM community_alerts 
-                       WHERE (expires_at IS NULL OR expires_at > ?)"""
-            params = [datetime.now().isoformat()]
-            
-            if junction_id:
-                query += " AND junction_id = ?"
-                params.append(junction_id)
-            
-            if severity:
-                query += " AND severity = ?"
-                params.append(severity)
-            
-            query += " ORDER BY timestamp DESC LIMIT ?"
-            params.append(limit)
-            
-            cursor = await db.execute(query, params)
-            rows = await cursor.fetchall()
-            
-            for row in rows:
-                alerts.append({
-                    "alert_id": row["id"],
-                    "alert_type": row["alert_type"],
-                    "severity": row["severity"],
-                    "message": row["message"],
-                    "junction_id": row["junction_id"],
-                    "timestamp": row["timestamp"],
-                    "expires_at": row["expires_at"],
-                })
-        
-        # Generate sample alerts if none exist (for demo)
-        if not alerts:
-            now = datetime.now()
-            sample_alerts = [
-                {
-                    "alert_id": 1,
-                    "alert_type": "high_risk",
-                    "severity": "medium",
-                    "message": "Multiple lane weaving incidents detected in the area. Drive carefully.",
-                    "junction_id": junction_id or "main",
-                    "timestamp": (now - timedelta(minutes=15)).isoformat(),
-                    "expires_at": (now + timedelta(hours=1)).isoformat(),
-                },
-                {
-                    "alert_id": 2,
-                    "alert_type": "congestion",
-                    "severity": "low",
-                    "message": "Moderate traffic congestion expected during peak hours.",
-                    "junction_id": junction_id or "main",
-                    "timestamp": (now - timedelta(hours=1)).isoformat(),
-                    "expires_at": (now + timedelta(hours=2)).isoformat(),
-                },
-            ]
-            alerts = sample_alerts
-        
-        return {
-            "alerts": alerts,
-            "total": len(alerts),
-            "generated_at": datetime.now().isoformat(),
-        }
+    db = get_db()
+    now_iso = datetime.now().isoformat()
+
+    alerts = []
+    q = db.collection(Collections.COMMUNITY_ALERTS).order_by(
+        "timestamp", direction="DESCENDING"
+    ).limit(limit)
+
+    async for doc in q.stream():
+        a = doc.to_dict()
+        exp = a.get("expires_at")
+        # Skip expired alerts
+        if exp and exp < now_iso:
+            continue
+        # Apply filters
+        if junction_id and a.get("junction_id") != junction_id:
+            continue
+        if severity and a.get("severity") != severity:
+            continue
+        alerts.append({
+            "alert_id": doc.id,
+            "alert_type": a.get("alert_type", ""),
+            "severity": a.get("severity", ""),
+            "message": a.get("message", ""),
+            "junction_id": a.get("junction_id", ""),
+            "timestamp": a.get("timestamp", ""),
+            "expires_at": exp,
+        })
+
+    # Demo alerts if none exist
+    if not alerts:
+        now = datetime.now()
+        alerts = [
+            {
+                "alert_id": "demo_1",
+                "alert_type": "high_risk",
+                "severity": "medium",
+                "message": "Multiple lane weaving incidents detected in the area. Drive carefully.",
+                "junction_id": junction_id or "main",
+                "timestamp": (now - timedelta(minutes=15)).isoformat(),
+                "expires_at": (now + timedelta(hours=1)).isoformat(),
+            },
+            {
+                "alert_id": "demo_2",
+                "alert_type": "congestion",
+                "severity": "low",
+                "message": "Moderate traffic congestion expected during peak hours.",
+                "junction_id": junction_id or "main",
+                "timestamp": (now - timedelta(hours=1)).isoformat(),
+                "expires_at": (now + timedelta(hours=2)).isoformat(),
+            },
+        ]
+
+    return {
+        "alerts": alerts,
+        "total": len(alerts),
+        "generated_at": now_iso,
+    }
 
 
 # =============================================================================
@@ -302,53 +258,35 @@ async def get_traffic_summary(
     Get current traffic summary for a junction.
     Includes density level and estimated wait times.
     """
-    async with aiosqlite.connect(str(DB_PATH)) as db:
-        db.row_factory = aiosqlite.Row
-        
-        # Get latest junction data
-        cursor = await db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='junction_safety'"
-        )
-        table_exists = await cursor.fetchone()
-        
-        density = 0.4
-        signal_phase = "normal"
-        
-        if table_exists:
-            cursor = await db.execute(
-                """SELECT traffic_density, updated_at 
-                   FROM junction_safety WHERE junction_id = ?
-                   ORDER BY updated_at DESC LIMIT 1""",
-                (junction_id,)
-            )
-            result = await cursor.fetchone()
-            if result:
-                density = result["traffic_density"] or 0.4
-        
-        # Check emergency status
-        cursor = await db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='emergency_status'"
-        )
-        emergency_exists = await cursor.fetchone()
-        
-        if emergency_exists:
-            cursor = await db.execute(
-                "SELECT active FROM emergency_status WHERE junction_id = ? AND active = 1",
-                (junction_id,)
-            )
-            if await cursor.fetchone():
-                signal_phase = "emergency"
-        
-        # Estimate wait time based on density
-        wait_time = int(density * 120)  # 0-120 seconds based on density
-        
-        return TrafficSummary(
-            junction_id=junction_id,
-            current_density=get_traffic_level(density),
-            estimated_wait_time=wait_time,
-            signal_phase=signal_phase,
-            last_updated=datetime.now().isoformat(),
-        )
+    db = get_db()
+
+    density = 0.4
+    signal_phase = "normal"
+
+    # Get latest junction data
+    q = db.collection(Collections.JUNCTION_SAFETY).where(
+        filter=FieldFilter("junction_id", "==", junction_id)
+    ).order_by("updated_at", direction="DESCENDING").limit(1)
+    async for doc in q.stream():
+        result = doc.to_dict()
+        density = result.get("traffic_density", 0.4)
+
+    # Check emergency status
+    eq = db.collection(Collections.EMERGENCY_STATUS).where(
+        filter=FieldFilter("junction_id", "==", junction_id)
+    ).where(filter=FieldFilter("active", "==", True)).limit(1)
+    async for _ in eq.stream():
+        signal_phase = "emergency"
+
+    wait_time = int(density * 120)
+
+    return TrafficSummary(
+        junction_id=junction_id,
+        current_density=get_traffic_level(density),
+        estimated_wait_time=wait_time,
+        signal_phase=signal_phase,
+        last_updated=datetime.now().isoformat(),
+    )
 
 
 @router.get("/violation-stats", summary="Get public violation statistics")
@@ -360,47 +298,34 @@ async def get_public_violation_stats(
     Get anonymized violation statistics for community awareness.
     No driver or vehicle information is included.
     """
-    async with aiosqlite.connect(str(DB_PATH)) as db:
-        db.row_factory = aiosqlite.Row
-        
-        start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-        
-        # Get violation counts by type
-        cursor = await db.execute(
-            """SELECT violation_type, COUNT(*) as count
-               FROM violations
-               WHERE timestamp >= ?
-               GROUP BY violation_type
-               ORDER BY count DESC""",
-            (start_date,)
-        )
-        by_type = await cursor.fetchall()
-        
-        # Get daily totals
-        cursor = await db.execute(
-            """SELECT DATE(timestamp) as date, COUNT(*) as count
-               FROM violations
-               WHERE timestamp >= ?
-               GROUP BY DATE(timestamp)
-               ORDER BY date""",
-            (start_date,)
-        )
-        daily = await cursor.fetchall()
-        
-        # Total count
-        cursor = await db.execute(
-            "SELECT COUNT(*) as count FROM violations WHERE timestamp >= ?",
-            (start_date,)
-        )
-        total = (await cursor.fetchone())["count"]
-        
-        return {
-            "period_days": days,
-            "total_violations": total,
-            "by_type": {row["violation_type"]: row["count"] for row in by_type},
-            "daily_counts": [{"date": row["date"], "count": row["count"]} for row in daily],
-            "message": "Drive safely! These statistics help improve road safety for everyone.",
-        }
+    db = get_db()
+    start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+    # Get violations since start_date
+    q = db.collection(Collections.VIOLATIONS).where(
+        filter=FieldFilter("timestamp", ">=", start_date)
+    ).order_by("timestamp")
+
+    by_type = {}
+    daily = {}
+    total = 0
+
+    async for doc in q.stream():
+        v = doc.to_dict()
+        total += 1
+        vtype = v.get("violation_type", "unknown")
+        by_type[vtype] = by_type.get(vtype, 0) + 1
+        ts = v.get("timestamp", "")
+        date = ts[:10] if len(ts) >= 10 else ts
+        daily[date] = daily.get(date, 0) + 1
+
+    return {
+        "period_days": days,
+        "total_violations": total,
+        "by_type": by_type,
+        "daily_counts": [{"date": k, "count": v} for k, v in sorted(daily.items())],
+        "message": "Drive safely! These statistics help improve road safety for everyone.",
+    }
 
 
 # =============================================================================
@@ -497,32 +422,20 @@ async def create_community_alert(
     expires_at = None
     if request.expires_in_hours:
         expires_at = (now + timedelta(hours=request.expires_in_hours)).isoformat()
-    
-    async with aiosqlite.connect(str(DB_PATH)) as db:
-        # Ensure table exists
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS community_alerts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                alert_type TEXT NOT NULL,
-                severity TEXT NOT NULL,
-                message TEXT NOT NULL,
-                junction_id TEXT NOT NULL,
-                timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
-                expires_at TEXT,
-                created_by TEXT
-            )
-        """)
-        
-        cursor = await db.execute(
-            """INSERT INTO community_alerts 
-               (alert_type, severity, message, junction_id, timestamp, expires_at, created_by)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (request.alert_type, request.severity, request.message, 
-             request.junction_id, now.isoformat(), expires_at, "admin")
-        )
-        await db.commit()
-        alert_id = cursor.lastrowid
-    
+
+    db = get_db()
+    doc_ref = await db.collection(Collections.COMMUNITY_ALERTS).add({
+        "alert_type": request.alert_type,
+        "severity": request.severity,
+        "message": request.message,
+        "junction_id": request.junction_id,
+        "timestamp": now.isoformat(),
+        "expires_at": expires_at,
+        "created_by": "admin",
+    })
+    # doc_ref is a tuple (update_time, doc_ref) for async add
+    alert_id = doc_ref[1].id if isinstance(doc_ref, tuple) else doc_ref.id
+
     return {
         "status": "created",
         "alert_id": alert_id,
@@ -553,51 +466,34 @@ async def broadcast_alert(
     expires_at = None
     if request.expires_in_hours:
         expires_at = (now + timedelta(hours=request.expires_in_hours)).isoformat()
-    
+
+    db = get_db()
+
     # Get all junction IDs
-    junction_ids = ["main"]  # Default
-    
-    async with aiosqlite.connect(str(DB_PATH)) as db:
-        db.row_factory = aiosqlite.Row
-        
-        # Check if junction_safety table exists
-        cursor = await db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='junction_safety'"
-        )
-        if await cursor.fetchone():
-            cursor = await db.execute("SELECT DISTINCT junction_id FROM junction_safety")
-            rows = await cursor.fetchall()
-            if rows:
-                junction_ids = [r["junction_id"] for r in rows]
-        
-        # Create alerts table if needed
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS community_alerts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                alert_type TEXT NOT NULL,
-                severity TEXT NOT NULL,
-                message TEXT NOT NULL,
-                junction_id TEXT NOT NULL,
-                timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
-                expires_at TEXT,
-                created_by TEXT
-            )
-        """)
-        
-        # Insert alert for each junction
-        created_ids = []
-        for junction_id in junction_ids:
-            cursor = await db.execute(
-                """INSERT INTO community_alerts 
-                   (alert_type, severity, message, junction_id, timestamp, expires_at, created_by)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (request.alert_type, request.severity, request.message, 
-                 junction_id, now.isoformat(), expires_at, "admin_broadcast")
-            )
-            created_ids.append(cursor.lastrowid)
-        
-        await db.commit()
-    
+    junction_ids = []
+    async for doc in db.collection(Collections.JUNCTION_SAFETY).stream():
+        jid = doc.to_dict().get("junction_id", doc.id)
+        if jid not in junction_ids:
+            junction_ids.append(jid)
+
+    if not junction_ids:
+        junction_ids = ["main"]
+
+    # Insert alert for each junction
+    created_ids = []
+    for junction_id in junction_ids:
+        doc_ref = await db.collection(Collections.COMMUNITY_ALERTS).add({
+            "alert_type": request.alert_type,
+            "severity": request.severity,
+            "message": request.message,
+            "junction_id": junction_id,
+            "timestamp": now.isoformat(),
+            "expires_at": expires_at,
+            "created_by": "admin_broadcast",
+        })
+        aid = doc_ref[1].id if isinstance(doc_ref, tuple) else doc_ref.id
+        created_ids.append(aid)
+
     return {
         "status": "broadcast",
         "alert_ids": created_ids,
@@ -612,23 +508,19 @@ async def broadcast_alert(
 
 @router.delete("/alerts/{alert_id}", summary="Delete a community alert")
 async def delete_community_alert(
-    alert_id: int,
+    alert_id: str,
     admin_key: str = Query(..., description="Admin API key for authorization"),
 ):
     """Delete a specific community alert."""
     if admin_key != "itms-admin-2024":
         raise HTTPException(status_code=401, detail="Invalid admin API key")
-    
-    async with aiosqlite.connect(str(DB_PATH)) as db:
-        cursor = await db.execute(
-            "DELETE FROM community_alerts WHERE id = ?",
-            (alert_id,)
-        )
-        await db.commit()
-        
-        if cursor.rowcount == 0:
-            raise HTTPException(status_code=404, detail="Alert not found")
-    
+
+    db = get_db()
+    doc = await db.collection(Collections.COMMUNITY_ALERTS).document(alert_id).get()
+    if not doc.exists:
+        raise HTTPException(status_code=404, detail="Alert not found")
+
+    await db.collection(Collections.COMMUNITY_ALERTS).document(alert_id).delete()
     return {"status": "deleted", "alert_id": alert_id}
 
 
@@ -639,17 +531,18 @@ async def clear_expired_alerts(
     """Remove all expired community alerts from the database."""
     if admin_key != "itms-admin-2024":
         raise HTTPException(status_code=401, detail="Invalid admin API key")
-    
+
+    db = get_db()
     now = datetime.now().isoformat()
-    
-    async with aiosqlite.connect(str(DB_PATH)) as db:
-        cursor = await db.execute(
-            "DELETE FROM community_alerts WHERE expires_at IS NOT NULL AND expires_at < ?",
-            (now,)
-        )
-        await db.commit()
-        deleted_count = cursor.rowcount
-    
+    deleted_count = 0
+
+    async for doc in db.collection(Collections.COMMUNITY_ALERTS).stream():
+        a = doc.to_dict()
+        exp = a.get("expires_at")
+        if exp and exp < now:
+            await doc.reference.delete()
+            deleted_count += 1
+
     return {
         "status": "cleared",
         "deleted_count": deleted_count,
@@ -662,18 +555,6 @@ async def clear_expired_alerts(
 # =============================================================================
 
 async def init_community_tables():
-    """Initialize community-related database tables."""
-    async with aiosqlite.connect(str(DB_PATH)) as db:
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS community_alerts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                alert_type TEXT NOT NULL,
-                severity TEXT NOT NULL,
-                message TEXT NOT NULL,
-                junction_id TEXT NOT NULL,
-                timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
-                expires_at TEXT,
-                created_by TEXT
-            )
-        """)
-        await db.commit()
+    """Initialize community-related database collections (no-op for Firestore)."""
+    # Firestore collections are created automatically on first write
+    pass

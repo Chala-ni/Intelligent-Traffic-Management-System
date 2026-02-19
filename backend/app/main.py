@@ -45,8 +45,48 @@ async def lifespan(app: FastAPI):
     try:
         await init_db()
         print("✅ Database initialized")
+        # Seed default admin user if Firestore is empty
+        from app.routers.auth import ensure_tables_exist
+        await ensure_tables_exist()
     except Exception as e:
         print(f"⚠️ Database init failed: {e}")
+
+    # Pre-load YOLO models, EasyOCR, TTS, and scoring engine at startup
+    # so they're ready before the first video starts
+    import threading
+    def _preload_models():
+        try:
+            from app.detection.yolo_detector import (
+                load_vehicle_model, load_plate_model, get_ocr_service,
+                get_scoring_engine, get_tts_service as get_detector_tts,
+            )
+            print("🔄 Pre-loading YOLO vehicle model...")
+            load_vehicle_model("cpu")
+            print("✅ Vehicle model pre-loaded")
+
+            print("🔄 Pre-loading plate detection model...")
+            load_plate_model("cpu")
+            print("✅ Plate model pre-loaded")
+
+            print("🔄 Pre-loading EasyOCR...")
+            get_ocr_service()
+            print("✅ EasyOCR pre-loaded")
+
+            print("🔄 Pre-loading scoring engine...")
+            get_scoring_engine()
+            print("✅ Scoring engine pre-loaded")
+
+            print("🔄 Pre-loading TTS service...")
+            get_detector_tts()
+            print("✅ TTS service pre-loaded")
+
+            print("🎉 All models and services pre-loaded successfully!")
+        except Exception as e:
+            print(f"⚠️ Model pre-loading error (non-fatal): {e}")
+
+    preload_thread = threading.Thread(target=_preload_models, daemon=True)
+    preload_thread.start()
+
     yield
     # Shutdown
     print("🛑 Shutting down...")
@@ -72,18 +112,23 @@ app = FastAPI(
 # Allow requests from both localhost and 127.0.0.1 variants
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:8080",
-        "http://127.0.0.1:8080",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "*",  # Allow all origins for development
-    ],
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["*"],
 )
+
+
+# --- Global Exception Handler (ensures CORS headers on 500 errors) ---
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    import traceback
+    traceback.print_exc()
+    return JSONResponse(
+        status_code=500,
+        content={"error": "Internal server error", "detail": str(exc)},
+    )
 
 # --- Include Routers ---
 app.include_router(video_router)
@@ -107,6 +152,12 @@ if static_dir.exists():
 videos_dir = Path(settings.data_dir) / "videos"
 if videos_dir.exists():
     app.mount("/videos", StaticFiles(directory=str(videos_dir)), name="videos")
+
+# Mount snapshots directory for serving violation evidence images
+snapshots_dir = Path(settings.data_dir) / "snapshots"
+snapshots_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/evidence", StaticFiles(directory=str(snapshots_dir)), name="evidence")
+app.mount("/snapshots", StaticFiles(directory=str(snapshots_dir)), name="snapshots")
 
 
 @app.get("/simulation", tags=["Simulation"])

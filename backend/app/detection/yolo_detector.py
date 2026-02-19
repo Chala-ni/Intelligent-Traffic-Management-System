@@ -38,19 +38,30 @@ settings = get_settings()
 # ============================================================================
 
 # Frame skipping - only run YOLO every N frames
-YOLO_DETECTION_INTERVAL: int = 2
+YOLO_DETECTION_INTERVAL: int = 1  # Run every analysis frame (analysis already throttled to 1 FPS)
 
 # Plate detection interval
-PLATE_DETECTION_INTERVAL: int = 3
+PLATE_DETECTION_INTERVAL: int = 1  # Detect plates every analysis frame (already at 1 FPS)
 
 # OCR cooldown per vehicle (seconds)
 OCR_COOLDOWN_SECONDS: float = 2.0
 
 # Speed estimation (pixels/sec to km/h)
-SPEED_SCALE_FACTOR: float = 0.5
-# Lowered thresholds for demo sensitivity
-SPEEDING_THRESHOLD_KMH: float = 60.0  # km/h threshold (for display/logic informative)
-SPEEDING_THRESHOLD_PIXELS: float = 120.0  # pixels/second for demo (more sensitive)
+# This factor depends on camera geometry (distance, angle, FOV).
+# Tuned for SriLankan_Traffic_Video.mp4 (1920x1080, overhead-angle).
+SPEED_SCALE_FACTOR: float = 1.5
+
+# Speed display cap — prevents unrealistic values from tracker jitter
+SPEED_MAX_KMH: float = 200.0
+
+# Speeding threshold (in km/h after scale conversion)
+SPEEDING_THRESHOLD_KMH: float = 50.0  # vehicles above this are flagged
+
+# Consecutive-frame speeding check: vehicle must exceed threshold for
+# this many consecutive analysis frames before being flagged as speeding.
+# At ANALYSIS_FPS=3, 2 consecutive frames = ~0.67s of sustained speeding.
+# This eliminates false positives from tracking jitter / ID swaps.
+SPEEDING_CONSECUTIVE_FRAMES: int = 2
 
 # Parking violation timing (shorter for demo sensitivity)
 PARKING_WARNING_SECONDS: float = 3.0  # seconds before a warning
@@ -111,6 +122,9 @@ parking_tracker: Dict[int, Dict[str, Any]] = {}
 
 # Penalized vehicles (for flashing effect)
 penalized_vehicles: Dict[int, float] = {}  # track_id -> penalize_time
+
+# Current analysis frame for evidence snapshot capture
+_current_analysis_frame: Optional[np.ndarray] = None
 
 # Previous frame detections (for frame skipping)
 _prev_detections: List[Any] = []
@@ -514,7 +528,16 @@ def get_zone_for_point(point: Tuple[int, int]) -> Optional[Dict]:
 
 def calculate_speed(track_id: int, centroid: Tuple[int, int], current_time: float) -> Tuple[float, float, bool]:
     """
-    Calculate vehicle speed from centroid movement.
+    Calculate vehicle speed from centroid movement with consecutive-frame validation.
+    
+    Speed must exceed threshold for SPEEDING_CONSECUTIVE_FRAMES in a row
+    to be flagged — this eliminates false positives from tracker jitter.
+    
+    Improvements:
+    - First real measurement uses raw speed (no EMA ramp-up from 0)
+    - Higher EMA alpha (0.5) for faster convergence
+    - Uses km/h threshold directly (not pixel threshold)
+    - Speed capped at SPEED_MAX_KMH
     
     Returns:
         Tuple of (speed_kmh, speed_pixels_per_sec, is_speeding)
@@ -529,6 +552,7 @@ def calculate_speed(track_id: int, centroid: Tuple[int, int], current_time: floa
             "speed_pixels": 0.0,
             "is_speeding": False,
             "frame_count": 0,
+            "consecutive_speeding": 0,
         }
         return 0.0, 0.0, False
     
@@ -547,13 +571,27 @@ def calculate_speed(track_id: int, centroid: Tuple[int, int], current_time: floa
     speed_pixels_per_sec = distance_pixels / time_delta
     speed_kmh = speed_pixels_per_sec * SPEED_SCALE_FACTOR
     
-    # Smooth with EMA
-    alpha = 0.3
-    smoothed_speed = alpha * speed_kmh + (1 - alpha) * history["speed"]
-    smoothed_pixels = alpha * speed_pixels_per_sec + (1 - alpha) * history["speed_pixels"]
+    # Cap unrealistic speeds (tracker jitter can cause huge jumps)
+    speed_kmh = min(speed_kmh, SPEED_MAX_KMH)
     
-    # Check speeding (use pixel threshold for demo accuracy)
-    is_speeding = smoothed_pixels > SPEEDING_THRESHOLD_PIXELS
+    # First real measurement: use raw speed directly (don't EMA from 0)
+    if history["frame_count"] == 1:
+        smoothed_speed = speed_kmh
+        smoothed_pixels = speed_pixels_per_sec
+    else:
+        # EMA smoothing (alpha=0.5 for responsive convergence)
+        alpha = 0.5
+        smoothed_speed = alpha * speed_kmh + (1 - alpha) * history["speed"]
+        smoothed_pixels = alpha * speed_pixels_per_sec + (1 - alpha) * history["speed_pixels"]
+    
+    # Consecutive-frame speeding check using km/h threshold
+    raw_over_threshold = smoothed_speed > SPEEDING_THRESHOLD_KMH
+    if raw_over_threshold:
+        history["consecutive_speeding"] = history.get("consecutive_speeding", 0) + 1
+    else:
+        history["consecutive_speeding"] = 0
+    
+    is_speeding = history["consecutive_speeding"] >= SPEEDING_CONSECUTIVE_FRAMES
     
     history["prev_centroid"] = centroid
     history["prev_time"] = current_time
@@ -571,6 +609,66 @@ def cleanup_speed_history(active_track_ids: set):
     for tid in to_remove:
         if speed_history[tid]["frame_count"] > TRACKING_HISTORY_MAX_AGE:
             del speed_history[tid]
+
+
+# ============================================================================
+# EVIDENCE SNAPSHOT CAPTURE
+# ============================================================================
+
+def _capture_evidence_snapshot(
+    track_id: int,
+    violation_type: str,
+    bbox: Tuple[int, int, int, int] = None,
+    extra_text: str = "",
+) -> Optional[str]:
+    """
+    Capture the current analysis frame as evidence for a violation.
+    Draws a red box around the violating vehicle + violation text + timestamp.
+    
+    Returns:
+        URL path to the evidence image (e.g., /evidence/evidence_parking_...) or None
+    """
+    global _current_analysis_frame
+    if _current_analysis_frame is None:
+        return None
+
+    try:
+        snapshots_dir = Path(settings.data_dir) / "snapshots"
+        snapshots_dir.mkdir(parents=True, exist_ok=True)
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        filename = f"evidence_{violation_type}_{ts}_{track_id}.jpg"
+        filepath = snapshots_dir / filename
+
+        evidence = _current_analysis_frame.copy()
+        font = cv2.FONT_HERSHEY_SIMPLEX
+
+        # Highlight the violating vehicle with a thick red box
+        if bbox:
+            x1, y1, x2, y2 = bbox
+            cv2.rectangle(evidence, (x1, y1), (x2, y2), (0, 0, 255), 4)
+            label = f"VIOLATION: {violation_type.upper().replace('_', ' ')}"
+            # Background for text
+            (tw, th), _ = cv2.getTextSize(label, font, 0.9, 2)
+            cv2.rectangle(evidence, (x1, y1 - th - 10), (x1 + tw + 4, y1), (0, 0, 255), -1)
+            cv2.putText(evidence, label, (x1 + 2, y1 - 6), font, 0.9, (255, 255, 255), 2)
+
+        # Extra text (e.g., speed info)
+        if extra_text:
+            cv2.putText(evidence, extra_text, (10, 40), font, 0.9, (0, 0, 255), 2)
+
+        # Timestamp overlay at bottom
+        ts_display = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        h = evidence.shape[0]
+        cv2.putText(evidence, f"Evidence: {ts_display}", (10, h - 20), font, 0.8, (0, 255, 255), 2)
+
+        cv2.imwrite(str(filepath), evidence, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        print(f"[EVIDENCE] 📸 Captured: {filename}")
+        return f"/evidence/{filename}"
+
+    except Exception as e:
+        print(f"[EVIDENCE] ❌ Error capturing evidence: {e}")
+        return None
 
 
 # ============================================================================
@@ -621,6 +719,7 @@ def check_parking_violation(
                     track_id=track_id,
                     plate_text=det.plate_text or entry.get("plate"),
                     zone_id=zone_id,
+                    bbox=det.bbox,
                 )
                 entry["penalized"] = True
                 penalized_vehicles[track_id] = current_time
@@ -666,8 +765,8 @@ def check_parking_violation(
         return 0.0, "", zone_id, track_id in penalized_vehicles
 
 
-def _apply_parking_penalty(track_id: int, plate_text: str, zone_id: str):
-    """Apply parking violation penalty to database via ScoringEngine."""
+def _apply_parking_penalty(track_id: int, plate_text: str, zone_id: str, bbox: Tuple[int, int, int, int] = None):
+    """Apply parking violation penalty to database with evidence capture."""
     scoring = get_scoring_engine()
     
     driver_id = plate_text or f"UNKNOWN-{track_id}"
@@ -678,12 +777,19 @@ def _apply_parking_penalty(track_id: int, plate_text: str, zone_id: str):
     
     ViolationType = scoring["ViolationType"]
     
+    # Capture evidence snapshot
+    evidence_path = _capture_evidence_snapshot(
+        track_id, "parking", bbox=bbox,
+        extra_text=f"Illegal Parking - Zone: {zone_id}"
+    )
+    
     try:
         driver, violation = scoring["engine"].record_violation(
             driver_id=driver_id,
             violation_type=ViolationType.PARKING_NO_PARKING,
-            location=f"zone:{zone_id}",  # Store zone_id for analytics lookup
+            location=f"zone:{zone_id}",
             license_plate=plate_text,
+            snapshot_path=evidence_path,
             notes="Automated detection - illegal parking > 15 seconds",
         )
         print(f"[PENALTY] 🚨 DB SAVED: {driver_id} | Score: {driver.current_score} | Fine: ${violation.fine_amount}")
@@ -692,8 +798,8 @@ def _apply_parking_penalty(track_id: int, plate_text: str, zone_id: str):
         print(f"[PENALTY] Error saving to DB: {e}")
 
 
-def _apply_speeding_penalty(track_id: int, plate_text: str, speed: float):
-    """Apply speeding violation penalty to database."""
+def _apply_speeding_penalty(track_id: int, plate_text: str, speed: float, bbox: Tuple[int, int, int, int] = None):
+    """Apply speeding violation penalty to database with evidence capture."""
     scoring = get_scoring_engine()
     
     driver_id = plate_text or f"UNKNOWN-{track_id}"
@@ -704,12 +810,19 @@ def _apply_speeding_penalty(track_id: int, plate_text: str, speed: float):
     
     ViolationType = scoring["ViolationType"]
     
+    # Capture evidence snapshot
+    evidence_path = _capture_evidence_snapshot(
+        track_id, "speeding", bbox=bbox,
+        extra_text=f"Speeding: {speed:.0f} km/h (Limit: {SPEEDING_THRESHOLD_KMH:.0f} km/h)"
+    )
+    
     try:
         driver, violation = scoring["engine"].record_violation(
             driver_id=driver_id,
             violation_type=ViolationType.SPEEDING,
             location="Traffic Camera",
             license_plate=plate_text,
+            snapshot_path=evidence_path,
             notes=f"Speeding: {speed:.0f} km/h detected",
         )
         print(f"[PENALTY] 🚨 SPEEDING DB SAVED: {driver_id} | Speed: {speed:.0f} km/h | Fine: ${violation.fine_amount}")
@@ -934,7 +1047,7 @@ def detect_plates_in_crops(
                             
                             # If this vehicle was speeding and now we have plate, penalize
                             if det.is_speeding and track_id not in penalized_vehicles:
-                                _apply_speeding_penalty(track_id, plate_text, det.speed_kmh)
+                                _apply_speeding_penalty(track_id, plate_text, det.speed_kmh, bbox=det.bbox)
                 
                 all_plates.append(plate_bbox)
                 vehicle_plate_map[track_id] = {"bbox": plate_bbox, "text": plate_text}
@@ -990,7 +1103,10 @@ def detect_and_track(
     """
     Complete detection pipeline with all integrations.
     """
-    global _frame_counter, _prev_plate_boxes
+    global _frame_counter, _prev_plate_boxes, _current_analysis_frame
+    
+    # Store current frame for evidence snapshot capture
+    _current_analysis_frame = frame.copy()
     
     timestamp = time.time()
     start_time = time.time()
@@ -1058,6 +1174,11 @@ def detect_and_track(
             det.is_penalized = True
             red_light_violations += 1
         
+        # ===== Wrong-Way Violation Detection =====
+        is_wrong_way = check_wrong_way_violation(det, timestamp)
+        if is_wrong_way:
+            det.is_penalized = True
+        
         # ===== MEMBER 2: Lane Weaving Detection =====
         if lane_service:
             try:
@@ -1114,6 +1235,15 @@ STOP_LINE_RATIO = 0.6  # 60% down from top
 # Red light violation tracking
 _red_light_violators: Dict[int, float] = {}  # track_id -> violation_time
 
+# Wrong-way tracking: track_id -> {"consecutive_wrong": int, "penalized": bool}
+_wrong_way_tracker: Dict[int, Dict[str, Any]] = {}
+
+# Wrong-way detection constants
+# Expected traffic flow direction: downward in frame (positive dy)
+WRONG_WAY_CONSECUTIVE_FRAMES: int = 3   # Must move wrong-way for 3 consecutive analysis frames
+WRONG_WAY_MIN_SPEED_PIXELS: float = 30.0  # Minimum speed to consider direction meaningful
+WRONG_WAY_COOLDOWN_SECONDS: float = 10.0  # Don't re-penalize same vehicle within 10s
+
 def check_red_light_violation(
     det: Detection,
     frame_height: int,
@@ -1122,11 +1252,13 @@ def check_red_light_violation(
     """
     Check if a vehicle is violating a red light.
     
-    Logic:
+    Enhanced Logic (v2):
     - Get current signal state for North lane (video feed)
     - Define stop line at STOP_LINE_RATIO of frame height
-    - If signal is RED and vehicle Y position > stop line and speed > 10 km/h:
-      - Trigger penalty
+    - If signal is RED and vehicle crossed stop line:
+      - Verify vehicle is MOVING TOWARD the stop line (downward in frame)
+      - Require minimum speed to avoid flagging slow-rolling stops
+      - Apply 5-second cooldown per vehicle to prevent duplicate penalties
     
     Args:
         det: Detection object with vehicle info
@@ -1161,13 +1293,22 @@ def check_red_light_violation(
         # Check if vehicle crossed the stop line (bottom of bbox past stop line)
         crossed_line = vehicle_y > stop_line_y
         
-        # Check if vehicle is moving (speed > 10 km/h)
+        # Check if vehicle is moving fast enough (not a slow stop/crawl)
         is_moving = det.speed_kmh > 10.0 or det.speed_pixels > 20.0
         
-        # Violation: Red light + crossed line + moving
-        if crossed_line and is_moving:
-            track_id = det.track_id
-            
+        # Direction-of-travel check: vehicle must be moving DOWNWARD in frame
+        # (toward/past stop line). This prevents flagging vehicles moving away.
+        moving_forward = False
+        track_id = det.track_id
+        if track_id in speed_history:
+            prev_centroid = speed_history[track_id].get("prev_centroid")
+            if prev_centroid:
+                # Positive dy = moving down = moving toward/past stop line
+                dy = det.centroid[1] - prev_centroid[1]
+                moving_forward = dy > 3  # At least 3px downward movement
+        
+        # Violation: Red light + crossed line + moving + correct direction
+        if crossed_line and is_moving and moving_forward:
             # Avoid duplicate violations (5 second cooldown)
             if track_id in _red_light_violators:
                 last_violation_time = _red_light_violators[track_id]
@@ -1181,7 +1322,7 @@ def check_red_light_violation(
             plate_text = det.plate_text or f"UNKNOWN_{track_id}"
             
             # Apply penalty
-            _apply_red_light_penalty(track_id, plate_text, det.speed_kmh)
+            _apply_red_light_penalty(track_id, plate_text, det.speed_kmh, bbox=det.bbox)
             
             return True
         
@@ -1192,8 +1333,8 @@ def check_red_light_violation(
         return False
 
 
-def _apply_red_light_penalty(track_id: int, plate_text: str, speed: float):
-    """Apply red light violation penalty to database."""
+def _apply_red_light_penalty(track_id: int, plate_text: str, speed: float, bbox: Tuple[int, int, int, int] = None):
+    """Apply red light violation penalty to database with evidence capture."""
     global penalized_vehicles
     
     scoring = get_scoring_engine()
@@ -1212,15 +1353,22 @@ def _apply_red_light_penalty(track_id: int, plate_text: str, speed: float):
     
     ViolationType = scoring["ViolationType"]
     
+    # Capture evidence snapshot
+    evidence_path = _capture_evidence_snapshot(
+        track_id, "red_light", bbox=bbox,
+        extra_text=f"Red Light Violation at {speed:.0f} km/h"
+    )
+    
     try:
-        # Check if ViolationType has RED_LIGHT_RUNNING, else use SPEEDING as fallback
-        violation_type = getattr(ViolationType, 'RED_LIGHT_RUNNING', ViolationType.SPEEDING)
+        # Use RED_LIGHT violation type
+        violation_type = ViolationType.RED_LIGHT
         
         driver, violation = scoring["engine"].record_violation(
             driver_id=driver_id,
             violation_type=violation_type,
             location="Traffic Camera",
             license_plate=plate_text,
+            snapshot_path=evidence_path,
             notes=f"Red Light Violation: Crossed stop line at {speed:.0f} km/h",
         )
         print(f"[RED_LIGHT] 🚨 VIOLATION DB SAVED: {driver_id} | Speed: {speed:.0f} km/h | Fine: ${violation.fine_amount}")
@@ -1229,6 +1377,136 @@ def _apply_red_light_penalty(track_id: int, plate_text: str, speed: float):
         
     except Exception as e:
         print(f"[RED_LIGHT] Error saving to DB: {e}")
+
+
+# ============================================================================
+# WRONG-WAY VIOLATION DETECTION
+# ============================================================================
+
+def check_wrong_way_violation(
+    det: Detection,
+    current_time: float,
+) -> bool:
+    """
+    Detect vehicles traveling against the dominant traffic flow.
+    
+    In the video feed, normal traffic flows DOWNWARD (increasing Y).
+    A vehicle consistently moving UPWARD (decreasing Y) at speed is wrong-way.
+    
+    Uses consecutive-frame validation: direction must be wrong for
+    WRONG_WAY_CONSECUTIVE_FRAMES in a row before flagging (avoids false alarms).
+    
+    Args:
+        det: Detection object with vehicle info
+        current_time: Current timestamp
+    
+    Returns:
+        True if wrong-way violation detected, False otherwise
+    """
+    global _wrong_way_tracker, penalized_vehicles
+    
+    track_id = det.track_id
+    
+    # Need speed history to check direction
+    if track_id not in speed_history:
+        return False
+    
+    # Need minimum speed to determine direction meaningfully
+    if det.speed_pixels < WRONG_WAY_MIN_SPEED_PIXELS:
+        # Moving too slowly to determine direction — reset counter
+        if track_id in _wrong_way_tracker:
+            _wrong_way_tracker[track_id]["consecutive_wrong"] = 0
+        return False
+    
+    # Compute direction of travel (dy over recent movement)
+    hist = speed_history[track_id]
+    prev_centroid = hist.get("prev_centroid")
+    if prev_centroid is None:
+        return False
+    
+    dy = det.centroid[1] - prev_centroid[1]
+    
+    # Normal flow = downward (dy > 0), Wrong-way = upward (dy < -3)
+    going_wrong_way = dy < -3
+    
+    if track_id not in _wrong_way_tracker:
+        _wrong_way_tracker[track_id] = {
+            "consecutive_wrong": 0,
+            "penalized": False,
+            "last_penalty_time": 0,
+        }
+    
+    entry = _wrong_way_tracker[track_id]
+    
+    if going_wrong_way:
+        entry["consecutive_wrong"] += 1
+    else:
+        entry["consecutive_wrong"] = 0
+        return False
+    
+    # Only flag after sustained wrong-way movement
+    if entry["consecutive_wrong"] < WRONG_WAY_CONSECUTIVE_FRAMES:
+        return False
+    
+    # Cooldown check
+    if (current_time - entry.get("last_penalty_time", 0)) < WRONG_WAY_COOLDOWN_SECONDS:
+        return True  # Still in violation state but don't re-penalize
+    
+    # Already penalized this vehicle?
+    if entry["penalized"]:
+        return True
+    
+    # Apply wrong-way penalty
+    entry["penalized"] = True
+    entry["last_penalty_time"] = current_time
+    
+    plate_text = det.plate_text or f"UNKNOWN_{track_id}"
+    _apply_wrong_way_penalty(track_id, plate_text, det.speed_kmh, bbox=det.bbox)
+    
+    return True
+
+
+def _apply_wrong_way_penalty(track_id: int, plate_text: str, speed: float, bbox: Tuple[int, int, int, int] = None):
+    """Apply wrong-way violation penalty to database with evidence capture."""
+    global penalized_vehicles
+    
+    scoring = get_scoring_engine()
+    driver_id = plate_text
+    
+    # TTS warning
+    speak_warning(
+        f"Wrong way violation! Vehicle {plate_text} is driving against traffic at {speed:.0f} kilometers per hour.",
+        track_id=track_id,
+        warning_type="wrong_way"
+    )
+    
+    if scoring["engine"] is None:
+        print(f"[WRONG_WAY] ⚠️ Scoring engine not available. Would penalize: {driver_id}")
+        return
+    
+    ViolationType = scoring["ViolationType"]
+    
+    # Capture evidence snapshot
+    evidence_path = _capture_evidence_snapshot(
+        track_id, "wrong_way", bbox=bbox,
+        extra_text=f"Wrong-Way Driving at {speed:.0f} km/h"
+    )
+    
+    try:
+        driver, violation = scoring["engine"].record_violation(
+            driver_id=driver_id,
+            violation_type=ViolationType.WRONG_WAY,
+            location="Traffic Camera",
+            license_plate=plate_text,
+            snapshot_path=evidence_path,
+            notes=f"Wrong-way driving: Moving against traffic flow at {speed:.0f} km/h",
+        )
+        print(f"[WRONG_WAY] 🚨 VIOLATION DB SAVED: {driver_id} | Speed: {speed:.0f} km/h | Fine: ${violation.fine_amount}")
+        
+        penalized_vehicles[track_id] = time.time()
+        
+    except Exception as e:
+        print(f"[WRONG_WAY] Error saving to DB: {e}")
 
 
 def get_north_signal_state() -> str:
@@ -1271,7 +1549,7 @@ def draw_stop_line(frame: np.ndarray) -> np.ndarray:
 
 
 def draw_parking_zones(frame: np.ndarray) -> np.ndarray:
-    """Draw the parking zone boundaries on the frame."""
+    """Draw the parking zone boundaries on the frame (full resolution)."""
     for zone in parking_zones:
         polygon = np.array(zone["polygon"], dtype=np.int32)
         color = zone.get("color", (0, 0, 255))
@@ -1501,9 +1779,11 @@ def process_video(
 # ============================================================================
 
 def reset_state():
-    """Reset all global tracking state."""
+    """Reset all global tracking state. Called when user stops streaming."""
     global _frame_counter, _prev_detections, _prev_plate_boxes
     global plate_history, ocr_cooldown, speed_history, parking_tracker, penalized_vehicles
+    global _red_light_violators, _last_emergency_detection_time, _wrong_way_tracker
+    global _current_analysis_frame
     
     _frame_counter = 0
     _prev_detections = []
@@ -1513,8 +1793,12 @@ def reset_state():
     speed_history.clear()
     parking_tracker.clear()
     penalized_vehicles.clear()
+    _red_light_violators.clear()
+    _wrong_way_tracker.clear()
+    _last_emergency_detection_time = 0
+    _current_analysis_frame = None
     
-    print("🔄 Detection state reset")
+    print("🔄 Detection state fully reset (tracking, speed, parking, plates, red-light, wrong-way, emergency)")
 
 
 def set_parking_zones(zones: List[Dict]):

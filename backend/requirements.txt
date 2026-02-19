@@ -42,13 +42,17 @@ scikit-fuzzy==0.5.0
 edge-tts==6.1.19
 pyttsx3==2.98
 
-# --- Database ---
-aiosqlite==0.20.0
-# Note: For production, consider PostgreSQL with asyncpg
+# --- Database (Firestore) ---
+firebase-admin==6.6.0
+google-cloud-firestore>=2.16.0
+# Note: SQLite has been fully replaced by Firebase Firestore
 
 # --- Authentication ---
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
+
+# --- Push Notifications (FCM) ---
+# (firebase-admin already listed under Database section above)
 
 # --- Utilities ---
 pydantic==2.10.3

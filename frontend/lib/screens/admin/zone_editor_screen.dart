@@ -285,6 +285,27 @@ class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
     _imageRect = Rect.fromLTWH(offsetX, offsetY, displayedWidth, displayedHeight);
   }
   
+  /// Read actual image dimensions from snapshot bytes for accurate coordinate mapping
+  void _resolveImageSize(Uint8List bytes) async {
+    try {
+      final codec = await ui.instantiateImageCodec(bytes);
+      final frame = await codec.getNextFrame();
+      final w = frame.image.width.toDouble();
+      final h = frame.image.height.toDouble();
+      frame.image.dispose();
+      codec.dispose();
+      if (w > 0 && h > 0 && (w != _imageSize.width || h != _imageSize.height)) {
+        debugPrint('[ZoneEditor] Image size: ${w.toInt()}x${h.toInt()}');
+        setState(() {
+          _imageSize = Size(w, h);
+          _calculateImageRect();
+        });
+      }
+    } catch (e) {
+      debugPrint('[ZoneEditor] Could not resolve image size: $e');
+    }
+  }
+  
   /// Convert image coordinates to screen coordinates
   Offset _imageToScreen(double imageX, double imageY) {
     return Offset(
@@ -515,38 +536,42 @@ class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
   }
 
   Widget _buildCanvas() {
-    return Container(
-      margin: const EdgeInsets.all(24),
-      decoration: BoxDecoration(
-        color: Colors.black,
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.3),
-            blurRadius: 20,
-          ),
-        ],
-      ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(16),
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            _displaySize = Size(constraints.maxWidth, constraints.maxHeight);
-            _calculateImageRect(); // Calculate actual image display area
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Center(
+        child: AspectRatio(
+          aspectRatio: _imageSize.width / _imageSize.height,
+          child: Container(
+            decoration: BoxDecoration(
+              color: Colors.black,
+              borderRadius: BorderRadius.circular(12),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.3),
+                  blurRadius: 20,
+                ),
+              ],
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  _displaySize = Size(constraints.maxWidth, constraints.maxHeight);
+                  _calculateImageRect(); // Calculate actual image display area
             
-            return GestureDetector(
-              onTapDown: _isDrawing ? _handleTap : null,
-              child: Stack(
-                children: [
-                  // Background - video snapshot for zone drawing
-                  _isLoadingSnapshot
-                      ? Center(
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              CircularProgressIndicator(color: AppColors.primary),
-                              const SizedBox(height: 16),
-                              Text(
+                  return GestureDetector(
+                    onTapDown: _isDrawing ? _handleTap : null,
+                    child: Stack(
+                      children: [
+                        // Background - video snapshot for zone drawing
+                        _isLoadingSnapshot
+                            ? Center(
+                                child: Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    CircularProgressIndicator(color: AppColors.primary),
+                                    const SizedBox(height: 16),
+                                    Text(
                                 'Loading video frame...',
                                 style: AppTypography.bodySmall.copyWith(color: Colors.white54),
                               ),
@@ -620,6 +645,9 @@ class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
               ),
             );
           },
+        ),
+      ),
+          ),
         ),
       ),
     );
@@ -701,8 +729,14 @@ class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
           return _buildPlaceholderBackground();
         }
         
+        // Decode image to get actual dimensions for coordinate mapping
+        final imageBytes = snapshot.data!;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _resolveImageSize(imageBytes);
+        });
+        
         return Image.memory(
-          snapshot.data!,
+          imageBytes,
           fit: BoxFit.contain,
           errorBuilder: (context, error, stackTrace) => _buildPlaceholderBackground(),
         );
@@ -1062,7 +1096,7 @@ class _ZoneEditorScreenState extends State<ZoneEditorScreen> {
 }
 
 class ParkingZone {
-  final int id;
+  final String id;
   final String zoneType;
   final String label;
   final List<List<double>> coordinates;
@@ -1078,7 +1112,7 @@ class ParkingZone {
   
   factory ParkingZone.fromJson(Map<String, dynamic> json) {
     return ParkingZone(
-      id: json['id'],
+      id: json['id'].toString(),
       zoneType: json['zone_type'] ?? 'no_parking',
       label: json['label'] ?? 'Zone',
       coordinates: (json['coordinates'] as List)

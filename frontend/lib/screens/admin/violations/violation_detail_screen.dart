@@ -186,7 +186,7 @@ class _ViolationDetailScreenState extends State<ViolationDetailScreen> {
                       ? ClipRRect(
                           borderRadius: BorderRadius.circular(12),
                           child: Image.network(
-                            '${AppConfig.apiBaseUrl}/snapshots/${violation.snapshotPath}',
+                            '${AppConfig.apiBaseUrl}/evidence/${violation.snapshotPath}',
                             fit: BoxFit.contain,
                             errorBuilder: (context, error, stackTrace) {
                               return _buildPlaceholderImage('Snapshot not available');

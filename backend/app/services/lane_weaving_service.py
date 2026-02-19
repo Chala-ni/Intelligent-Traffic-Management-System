@@ -361,54 +361,39 @@ def cleanup_old_tracks(max_age_seconds: float = 30.0):
 # ============================================================================
 
 async def save_weaving_event_to_db(event: WeavingEvent):
-    """Save a lane weaving event to the database."""
+    """Save a lane weaving event to Firestore."""
     try:
-        import aiosqlite
-        from app.config import get_settings
-        
-        settings = get_settings()
-        db_path = settings.data_dir / "traffic.db"
-        
-        async with aiosqlite.connect(db_path) as db:
-            await db.execute("""
-                INSERT INTO lane_weaving_events 
-                (vehicle_id, plate_number, avg_x_velocity, direction_changes, duration_frames)
-                VALUES (?, ?, ?, ?, ?)
-            """, (
-                event.vehicle_id,
-                event.plate_number,
-                event.avg_x_velocity,
-                event.direction_changes,
-                event.duration_frames,
-            ))
-            await db.commit()
-            print(f"[DB] Saved weaving event for vehicle {event.vehicle_id}")
+        from app.db.firestore_client import get_db, Collections
+
+        db = get_db()
+        await db.collection(Collections.LANE_WEAVING_EVENTS).add({
+            "vehicle_id": event.vehicle_id,
+            "plate_number": event.plate_number,
+            "avg_x_velocity": event.avg_x_velocity,
+            "direction_changes": event.direction_changes,
+            "duration_frames": event.duration_frames,
+            "timestamp": event.timestamp.isoformat(),
+        })
+        print(f"[DB] Saved weaving event for vehicle {event.vehicle_id}")
     except Exception as e:
         print(f"[DB] Error saving weaving event: {e}")
 
 
 async def update_junction_safety_in_db():
-    """Update junction safety score in database."""
+    """Update junction safety score in Firestore."""
     try:
-        import aiosqlite
-        from app.config import get_settings
-        
-        settings = get_settings()
-        db_path = settings.data_dir / "traffic.db"
+        from app.db.firestore_client import get_db, Collections
+
+        db = get_db()
         safety = get_junction_safety()
-        
-        async with aiosqlite.connect(db_path) as db:
-            await db.execute("""
-                INSERT OR REPLACE INTO junction_safety 
-                (id, junction_id, safety_score, last_violation_type, violations_last_hour, updated_at)
-                VALUES (1, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            """, (
-                safety.junction_id,
-                safety.safety_score,
-                safety.last_violation_type,
-                safety.violations_last_hour,
-            ))
-            await db.commit()
+        doc_id = safety.junction_id or "main"
+        await db.collection(Collections.JUNCTION_SAFETY).document(doc_id).set({
+            "junction_id": safety.junction_id,
+            "safety_score": safety.safety_score,
+            "last_violation_type": safety.last_violation_type,
+            "violations_last_hour": safety.violations_last_hour,
+            "updated_at": datetime.now().isoformat(),
+        }, merge=True)
     except Exception as e:
         print(f"[DB] Error updating junction safety: {e}")
 

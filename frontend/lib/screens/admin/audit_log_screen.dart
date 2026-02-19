@@ -636,7 +636,7 @@ class _AuditLogScreenState extends State<AuditLogScreen> {
 }
 
 class AuditLogEntry {
-  final int id;
+  final String id;
   final String adminUsername;
   final String action;
   final String? details;
@@ -654,7 +654,7 @@ class AuditLogEntry {
   
   factory AuditLogEntry.fromJson(Map<String, dynamic> json) {
     return AuditLogEntry(
-      id: json['id'],
+      id: json['id'].toString(),
       adminUsername: json['admin_username'] ?? 'Unknown',
       action: json['action'] ?? '',
       details: json['details'],

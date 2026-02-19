@@ -24,3 +24,11 @@ export 'splash/splash_screen.dart';
 
 // Platform router
 export 'platform_router.dart';
+
+// Driver screens
+export 'driver/driver_shell_screen.dart';
+export 'driver/driver_home_screen.dart';
+export 'driver/driver_violations_screen.dart';
+export 'driver/driver_fines_screen.dart';
+export 'driver/driver_profile_screen.dart';
+export 'driver/payment_screen.dart';

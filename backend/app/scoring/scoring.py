@@ -4,7 +4,6 @@ Tracks driver behavior, calculates risk scores, and applies violation penalties.
 """
 
 import time
-import sqlite3
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -12,11 +11,9 @@ from datetime import datetime, timedelta
 from enum import Enum
 
 from app.config import get_settings
+from app.db.firestore_client import get_sync_db, Collections
 
 settings = get_settings()
-
-# Database path for persistence
-DB_PATH = Path(__file__).parent.parent.parent / "traffic.db"
 
 
 class ViolationType(str, Enum):
@@ -293,68 +290,53 @@ class ScoringEngine:
     
     def _save_to_database(self, driver: DriverScore, violation: ViolationRecord):
         """
-        Persist driver and violation data to SQLite database.
+        Persist driver and violation data to Firestore.
         """
         try:
-            conn = sqlite3.connect(str(DB_PATH))
-            cursor = conn.cursor()
-            
-            # First insert the violation record
+            db = get_sync_db()
+
+            # Insert violation record
             penalty = VIOLATION_PENALTIES.get(violation.violation_type, {"severity": "medium"})
-            cursor.execute("""
-                INSERT INTO violations (driver_id, violation_type, severity, fine_amount, timestamp, location, evidence_path, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                violation.driver_id,
-                violation.violation_type.value,
-                penalty.get("severity", "medium"),
-                violation.fine_amount,
-                datetime.fromtimestamp(violation.timestamp).strftime("%Y-%m-%d %H:%M:%S"),
-                violation.location or "Unknown",
-                violation.snapshot_path,
-                "pending",
-            ))
-            
-            # Now calculate actual totals from database
-            cursor.execute("""
-                SELECT COUNT(*) as count, COALESCE(SUM(fine_amount), 0) as total_fines
-                FROM violations WHERE driver_id = ?
-            """, (driver.driver_id,))
-            row = cursor.fetchone()
-            actual_violations = row[0] if row else 0
-            actual_fines = row[1] if row else 0.0
-            
-            # Calculate score based on actual violations (10 points per violation, min 0)
+            db.collection(Collections.VIOLATIONS).add({
+                "driver_id": violation.driver_id,
+                "violation_type": violation.violation_type.value,
+                "severity": penalty.get("severity", "medium"),
+                "fine_amount": violation.fine_amount,
+                "points_deducted": penalty.get("points", 0),
+                "timestamp": datetime.fromtimestamp(violation.timestamp).strftime("%Y-%m-%d %H:%M:%S"),
+                "location": violation.location or "Unknown",
+                "license_plate": violation.license_plate or violation.driver_id,
+                "evidence_path": violation.snapshot_path,
+                "notes": violation.notes,
+                "status": "pending",
+            })
+
+            # Calculate actual totals from Firestore
+            vio_docs = list(
+                db.collection(Collections.VIOLATIONS)
+                .where("driver_id", "==", driver.driver_id)
+                .stream()
+            )
+            actual_violations = len(vio_docs)
+            actual_fines = sum(d.to_dict().get("fine_amount", 0) for d in vio_docs)
+
+            # Calculate score (10 points per violation, min 0)
             calculated_score = max(0, 100 - (actual_violations * 10))
-            
-            # Update or insert driver with correct counts
-            cursor.execute("""
-                INSERT INTO drivers (driver_id, current_score, total_violations, total_fines, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(driver_id) DO UPDATE SET
-                    current_score = ?,
-                    total_violations = ?,
-                    total_fines = ?,
-                    updated_at = ?
-            """, (
-                driver.driver_id,
-                calculated_score,
-                actual_violations,
-                actual_fines,
-                datetime.fromtimestamp(driver.created_at).strftime("%Y-%m-%d %H:%M:%S"),
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                # For UPDATE clause
-                calculated_score,
-                actual_violations,
-                actual_fines,
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            ))
-            
-            conn.commit()
-            conn.close()
-            
+
+            # Upsert driver document (use driver_id as doc ID)
+            db.collection(Collections.DRIVERS).document(driver.driver_id).set({
+                "driver_id": driver.driver_id,
+                "current_score": calculated_score,
+                "total_violations": actual_violations,
+                "total_fines": actual_fines,
+                "created_at": datetime.fromtimestamp(driver.created_at).strftime("%Y-%m-%d %H:%M:%S"),
+                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }, merge=True)
+
         except Exception as e:
+            import traceback
             print(f"[SCORING] DB Error: {e}")
+            traceback.print_exc()
     
     def get_driver_score(self, driver_id: str) -> Optional[DriverScore]:
         """Get driver score if exists."""

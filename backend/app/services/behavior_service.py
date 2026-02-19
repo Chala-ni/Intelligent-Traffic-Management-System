@@ -458,27 +458,19 @@ def reset_behaviors():
 # ============================================================================
 
 async def save_behavior_event_to_db(event: BehaviorEvent):
-    """Save a behavior event to the database."""
+    """Save a behavior event to Firestore."""
     try:
-        import aiosqlite
-        from app.config import get_settings
-        
-        settings = get_settings()
-        db_path = settings.data_dir / "traffic.db"
-        
-        async with aiosqlite.connect(db_path) as db:
-            await db.execute("""
-                INSERT INTO abnormal_behavior_log 
-                (vehicle_id, behavior_type, severity, plate_number, timestamp)
-                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-            """, (
-                event.vehicle_id,
-                event.behavior_type.value,
-                event.severity.value,
-                event.plate_number,
-            ))
-            await db.commit()
-            print(f"[DB] Saved behavior event: {event.behavior_type.value} for vehicle {event.vehicle_id}")
+        from app.db.firestore_client import get_db, Collections
+
+        db = get_db()
+        await db.collection(Collections.ABNORMAL_BEHAVIOR).add({
+            "vehicle_id": event.vehicle_id,
+            "behavior_type": event.behavior_type.value,
+            "severity": event.severity.value,
+            "plate_number": event.plate_number,
+            "timestamp": datetime.now().isoformat(),
+        })
+        print(f"[DB] Saved behavior event: {event.behavior_type.value} for vehicle {event.vehicle_id}")
     except Exception as e:
         print(f"[DB] Error saving behavior event: {e}")
 

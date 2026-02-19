@@ -35,6 +35,7 @@ class ApiEndpoints {
   static const String myNotifications = '/driver/notifications';
   static String markNotificationRead(int id) => '/driver/notifications/$id/read';
   static const String scoreHistory = '/driver/score-history';
+  static const String registerFcmToken = '/driver/fcm-token';
 
   // ============== COMMUNITY ENDPOINTS ==============
   

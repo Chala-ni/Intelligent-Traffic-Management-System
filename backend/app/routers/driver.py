@@ -5,19 +5,18 @@ Requires JWT authentication with driver role.
 
 from datetime import datetime
 from typing import List, Optional
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
-import aiosqlite
+from pydantic import BaseModel, field_validator
+from google.cloud.firestore_v1 import FieldFilter
 
 from app.config import get_settings
+from app.db.firestore_client import get_db, Collections
 from app.routers.auth import get_current_driver, UserInfo, decode_token
 
 settings = get_settings()
 router = APIRouter(prefix="/driver", tags=["Driver App"])
-
-# Database path
-DB_PATH = settings.data_dir.parent / "backend" / "traffic.db"
 
 
 # =============================================================================
@@ -25,7 +24,7 @@ DB_PATH = settings.data_dir.parent / "backend" / "traffic.db"
 # =============================================================================
 
 class DriverProfile(BaseModel):
-    user_id: int
+    user_id: str
     phone: str
     name: Optional[str]
     plate_number: str
@@ -66,6 +65,39 @@ class NotificationRecord(BaseModel):
     read: bool
 
 
+class FcmTokenRequest(BaseModel):
+    fcm_token: str
+    platform: str = "android"  # 'android' or 'ios'
+
+
+class ProfileUpdate(BaseModel):
+    """Request model for updating driver profile."""
+    name: Optional[str] = None
+    phone: Optional[str] = None
+
+    @field_validator('name')
+    @classmethod
+    def validate_name(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            v = v.strip()
+            if v and len(v) < 2:
+                raise ValueError('Name must be at least 2 characters')
+            if len(v) > 100:
+                raise ValueError('Name must be at most 100 characters')
+            return v if v else None
+        return None
+
+    @field_validator('phone')
+    @classmethod
+    def validate_phone(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            v = v.strip()
+            if v and not re.match(r'^[\+]?[0-9\s\-]{10,15}$', v):
+                raise ValueError('Invalid phone number format')
+            return v if v else None
+        return None
+
+
 # =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
@@ -86,16 +118,10 @@ def get_risk_level(score: int) -> str:
 
 async def get_plate_from_token(user: UserInfo) -> str:
     """Extract plate number from user token data."""
-    # The plate number should be stored in a driver_users table lookup
-    async with aiosqlite.connect(str(DB_PATH)) as db:
-        db.row_factory = aiosqlite.Row
-        cursor = await db.execute(
-            "SELECT plate_number FROM driver_users WHERE id = ?",
-            (user.user_id,)
-        )
-        result = await cursor.fetchone()
-        if result:
-            return result["plate_number"]
+    db = get_db()
+    doc = await db.collection(Collections.DRIVER_USERS).document(str(user.user_id)).get()
+    if doc.exists:
+        return doc.to_dict().get("plate_number", "")
     return ""
 
 
@@ -111,45 +137,84 @@ async def get_driver_profile(user: UserInfo = Depends(get_current_driver)):
     - Current safety score
     - Total violations and fines
     """
-    async with aiosqlite.connect(str(DB_PATH)) as db:
-        db.row_factory = aiosqlite.Row
-        
-        # Get driver user details
-        cursor = await db.execute(
-            """SELECT id, phone, name, plate_number, created_at 
-               FROM driver_users WHERE id = ?""",
-            (user.user_id,)
+    db = get_db()
+
+    # Get driver user details
+    doc = await db.collection(Collections.DRIVER_USERS).document(str(user.user_id)).get()
+    if not doc.exists:
+        raise HTTPException(status_code=404, detail="Driver profile not found")
+
+    driver_user = doc.to_dict()
+    plate_number = driver_user.get("plate_number", "")
+
+    # Get score from drivers collection
+    driver_doc = await db.collection(Collections.DRIVERS).document(plate_number).get()
+    if driver_doc.exists:
+        ds = driver_doc.to_dict()
+        current_score = ds.get("current_score", 100)
+        total_violations = ds.get("total_violations", 0)
+        total_fines = ds.get("total_fines", 0.0)
+    else:
+        current_score = 100
+        total_violations = 0
+        total_fines = 0.0
+
+    return DriverProfile(
+        user_id=doc.id,
+        phone=driver_user.get("phone", ""),
+        name=driver_user.get("name"),
+        plate_number=plate_number,
+        current_score=current_score,
+        risk_level=get_risk_level(current_score),
+        total_violations=total_violations,
+        total_fines=total_fines,
+        member_since=driver_user.get("created_at") or datetime.now().isoformat(),
+    )
+
+
+@router.put("/me", response_model=DriverProfile, summary="Update driver profile")
+async def update_driver_profile(
+    data: ProfileUpdate,
+    user: UserInfo = Depends(get_current_driver),
+):
+    """
+    Update the current driver's profile.
+    Currently supports updating: name, phone.
+    """
+    db = get_db()
+
+    doc = await db.collection(Collections.DRIVER_USERS).document(str(user.user_id)).get()
+    if not doc.exists:
+        raise HTTPException(status_code=404, detail="Driver profile not found")
+
+    update_fields = {}
+
+    if data.name is not None:
+        update_fields["name"] = data.name
+
+    if data.phone is not None and data.phone != doc.to_dict().get("phone"):
+        # Check phone uniqueness
+        phone_query = (
+            db.collection(Collections.DRIVER_USERS)
+            .where(filter=FieldFilter("phone", "==", data.phone))
+            .limit(1)
         )
-        driver_user = await cursor.fetchone()
-        
-        if not driver_user:
-            raise HTTPException(status_code=404, detail="Driver profile not found")
-        
-        plate_number = driver_user["plate_number"]
-        
-        # Get score from drivers table
-        cursor = await db.execute(
-            """SELECT current_score, total_violations, total_fines 
-               FROM drivers WHERE driver_id = ?""",
-            (plate_number,)
-        )
-        driver_score = await cursor.fetchone()
-        
-        current_score = driver_score["current_score"] if driver_score else 100
-        total_violations = driver_score["total_violations"] if driver_score else 0
-        total_fines = driver_score["total_fines"] if driver_score else 0.0
-        
-        return DriverProfile(
-            user_id=driver_user["id"],
-            phone=driver_user["phone"],
-            name=driver_user["name"],
-            plate_number=plate_number,
-            current_score=current_score,
-            risk_level=get_risk_level(current_score),
-            total_violations=total_violations,
-            total_fines=total_fines,
-            member_since=driver_user["created_at"] or datetime.now().isoformat(),
-        )
+        async for existing in phone_query.stream():
+            if existing.id != str(user.user_id):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Phone number already in use by another account"
+                )
+        update_fields["phone"] = data.phone
+
+    if not update_fields:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    update_fields["updated_at"] = datetime.utcnow().isoformat()
+    await db.collection(Collections.DRIVER_USERS).document(str(user.user_id)).update(update_fields)
+
+    # Return updated profile
+    return await get_driver_profile(user)
 
 
 @router.get("/my-violations", summary="Get driver's violation history")
@@ -163,49 +228,54 @@ async def get_my_violations(
     Filtered by the driver's plate number.
     """
     plate_number = await get_plate_from_token(user)
-    
-    async with aiosqlite.connect(str(DB_PATH)) as db:
-        db.row_factory = aiosqlite.Row
-        
-        # Query violations for this plate
-        cursor = await db.execute(
-            """SELECT violation_id, violation_type, timestamp, location,
-                      fine_amount, points_deducted, snapshot_path, notes
-               FROM violations 
-               WHERE driver_id = ? OR license_plate = ?
-               ORDER BY timestamp DESC
-               LIMIT ? OFFSET ?""",
-            (plate_number, plate_number, limit, offset)
-        )
-        violations = await cursor.fetchall()
-        
-        # Get total count
-        cursor = await db.execute(
-            """SELECT COUNT(*) as count FROM violations 
-               WHERE driver_id = ? OR license_plate = ?""",
-            (plate_number, plate_number)
-        )
-        total = (await cursor.fetchone())["count"]
-        
-        return {
-            "violations": [
-                {
-                    "violation_id": v["violation_id"],
-                    "violation_type": v["violation_type"],
-                    "timestamp": v["timestamp"],
-                    "location": v["location"],
-                    "fine_amount": v["fine_amount"],
-                    "points_deducted": v["points_deducted"],
-                    "evidence_path": v["snapshot_path"],
-                    "notes": v["notes"],
-                    "status": "recorded",
-                }
-                for v in violations
-            ],
-            "total": total,
-            "limit": limit,
-            "offset": offset,
-        }
+    db = get_db()
+
+    # Query violations where driver_id or license_plate matches
+    all_violations = []
+    # Query by driver_id
+    q1 = db.collection(Collections.VIOLATIONS).where(
+        filter=FieldFilter("driver_id", "==", plate_number)
+    ).order_by("timestamp", direction="DESCENDING")
+    async for doc in q1.stream():
+        d = doc.to_dict()
+        d["_id"] = doc.id
+        all_violations.append(d)
+
+    # Query by license_plate (avoid duplicates)
+    seen_ids = {v["_id"] for v in all_violations}
+    q2 = db.collection(Collections.VIOLATIONS).where(
+        filter=FieldFilter("license_plate", "==", plate_number)
+    ).order_by("timestamp", direction="DESCENDING")
+    async for doc in q2.stream():
+        if doc.id not in seen_ids:
+            d = doc.to_dict()
+            d["_id"] = doc.id
+            all_violations.append(d)
+
+    # Sort combined results by timestamp desc
+    all_violations.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+    total = len(all_violations)
+    page = all_violations[offset: offset + limit]
+
+    return {
+        "violations": [
+            {
+                "violation_id": v.get("violation_id", v["_id"]),
+                "violation_type": v.get("violation_type", ""),
+                "timestamp": v.get("timestamp", ""),
+                "location": v.get("location"),
+                "fine_amount": v.get("fine_amount", 0),
+                "points_deducted": v.get("points_deducted", 0),
+                "evidence_path": v.get("snapshot_path"),
+                "notes": v.get("notes"),
+                "status": "recorded",
+            }
+            for v in page
+        ],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @router.get("/my-fines", summary="Get driver's unpaid fines")
@@ -218,73 +288,66 @@ async def get_my_fines(
     Default shows unpaid fines only.
     """
     plate_number = await get_plate_from_token(user)
-    
-    async with aiosqlite.connect(str(DB_PATH)) as db:
-        db.row_factory = aiosqlite.Row
-        
-        # Check if dynamic_fines table exists
-        cursor = await db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='dynamic_fines'"
-        )
-        table_exists = await cursor.fetchone()
-        
-        fines = []
-        
-        if table_exists:
-            # Query from dynamic_fines table
-            query = """SELECT id, zone_type, total_fine, base_penalty, 
-                              duration_penalty, impact_penalty, created_at
-                       FROM dynamic_fines 
-                       WHERE plate_number = ?
-                       ORDER BY created_at DESC"""
-            cursor = await db.execute(query, (plate_number,))
-            fine_records = await cursor.fetchall()
-            
-            for f in fine_records:
+    db = get_db()
+
+    fines = []
+
+    # Query from dynamic_fines collection
+    q = db.collection(Collections.DYNAMIC_FINES).where(
+        filter=FieldFilter("plate_number", "==", plate_number)
+    ).order_by("created_at", direction="DESCENDING")
+    async for doc in q.stream():
+        f = doc.to_dict()
+        fines.append({
+            "fine_id": doc.id,
+            "violation_type": f.get("zone_type", ""),
+            "amount": f.get("total_fine", 0),
+            "issued_date": f.get("created_at", ""),
+            "due_date": None,
+            "status": "unpaid",
+            "breakdown": {
+                "base": f.get("base_penalty", 0),
+                "duration": f.get("duration_penalty", 0),
+                "impact": f.get("impact_penalty", 0),
+            },
+        })
+
+    # Also get fines from violations collection
+    for field_name in ("driver_id", "license_plate"):
+        q2 = db.collection(Collections.VIOLATIONS).where(
+            filter=FieldFilter(field_name, "==", plate_number)
+        ).order_by("timestamp", direction="DESCENDING")
+        async for doc in q2.stream():
+            v = doc.to_dict()
+            if v.get("fine_amount", 0) > 0:
                 fines.append({
-                    "fine_id": f["id"],
-                    "violation_type": f["zone_type"],
-                    "amount": f["total_fine"],
-                    "issued_date": f["created_at"],
+                    "fine_id": hash(doc.id) % 10000,
+                    "violation_type": v.get("violation_type", ""),
+                    "amount": v.get("fine_amount", 0),
+                    "issued_date": v.get("timestamp", ""),
                     "due_date": None,
-                    "status": "unpaid",  # TODO: Add payment tracking
-                    "breakdown": {
-                        "base": f["base_penalty"],
-                        "duration": f["duration_penalty"],
-                        "impact": f["impact_penalty"],
-                    }
+                    "status": "unpaid",
+                    "breakdown": None,
                 })
-        
-        # Also get fines from violations table
-        cursor = await db.execute(
-            """SELECT violation_id, violation_type, fine_amount, timestamp
-               FROM violations 
-               WHERE (driver_id = ? OR license_plate = ?) AND fine_amount > 0
-               ORDER BY timestamp DESC""",
-            (plate_number, plate_number)
-        )
-        violation_fines = await cursor.fetchall()
-        
-        for v in violation_fines:
-            fines.append({
-                "fine_id": hash(v["violation_id"]) % 10000,
-                "violation_type": v["violation_type"],
-                "amount": v["fine_amount"],
-                "issued_date": v["timestamp"],
-                "due_date": None,
-                "status": "unpaid",
-                "breakdown": None,
-            })
-        
-        # Calculate totals
-        total_unpaid = sum(f["amount"] for f in fines if f["status"] == "unpaid")
-        
-        return {
-            "fines": fines,
-            "total_count": len(fines),
-            "total_unpaid_amount": total_unpaid,
-            "currency": "LKR",
-        }
+
+    # Deduplicate by fine_id
+    seen = set()
+    unique_fines = []
+    for f in fines:
+        fid = f["fine_id"]
+        if fid not in seen:
+            seen.add(fid)
+            unique_fines.append(f)
+    fines = unique_fines
+
+    total_unpaid = sum(f["amount"] for f in fines if f["status"] == "unpaid")
+
+    return {
+        "fines": fines,
+        "total_count": len(fines),
+        "total_unpaid_amount": total_unpaid,
+        "currency": "LKR",
+    }
 
 
 @router.get("/notifications", summary="Get driver notifications")
@@ -298,83 +361,66 @@ async def get_notifications(
     Includes warnings, violation notices, and system messages.
     """
     plate_number = await get_plate_from_token(user)
-    
-    async with aiosqlite.connect(str(DB_PATH)) as db:
-        db.row_factory = aiosqlite.Row
-        
-        # Check if notifications table exists
-        cursor = await db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='driver_notifications'"
-        )
-        table_exists = await cursor.fetchone()
-        
-        notifications = []
-        
-        if table_exists:
-            query = """SELECT id, title, message, notification_type, timestamp, read
-                       FROM driver_notifications
-                       WHERE plate_number = ?"""
-            if unread_only:
-                query += " AND read = 0"
-            query += " ORDER BY timestamp DESC LIMIT ?"
-            
-            cursor = await db.execute(query, (plate_number, limit))
-            notif_records = await cursor.fetchall()
-            
-            for n in notif_records:
-                notifications.append({
-                    "notification_id": n["id"],
-                    "title": n["title"],
-                    "message": n["message"],
-                    "notification_type": n["notification_type"],
-                    "timestamp": n["timestamp"],
-                    "read": bool(n["read"]),
-                })
-        
-        # Generate notifications from recent violations
-        cursor = await db.execute(
-            """SELECT violation_type, timestamp, fine_amount
-               FROM violations 
-               WHERE (driver_id = ? OR license_plate = ?)
-               ORDER BY timestamp DESC LIMIT 10""",
-            (plate_number, plate_number)
-        )
-        recent_violations = await cursor.fetchall()
-        
-        for v in recent_violations:
+    db = get_db()
+
+    notifications = []
+
+    # Query from driver_notifications collection
+    q = db.collection(Collections.DRIVER_NOTIFICATIONS).where(
+        filter=FieldFilter("plate_number", "==", plate_number)
+    )
+    if unread_only:
+        q = q.where(filter=FieldFilter("read", "==", False))
+    q = q.order_by("timestamp", direction="DESCENDING").limit(limit)
+
+    async for doc in q.stream():
+        n = doc.to_dict()
+        notifications.append({
+            "notification_id": doc.id,
+            "title": n.get("title", ""),
+            "message": n.get("message", ""),
+            "notification_type": n.get("notification_type", "info"),
+            "timestamp": n.get("timestamp", ""),
+            "read": bool(n.get("read", False)),
+        })
+
+    # Generate notifications from recent violations
+    for field_name in ("driver_id", "license_plate"):
+        vq = db.collection(Collections.VIOLATIONS).where(
+            filter=FieldFilter(field_name, "==", plate_number)
+        ).order_by("timestamp", direction="DESCENDING").limit(10)
+        async for doc in vq.stream():
+            v = doc.to_dict()
             notifications.append({
-                "notification_id": hash(f"{v['timestamp']}{v['violation_type']}") % 100000,
-                "title": f"{v['violation_type'].replace('_', ' ').title()} Recorded",
-                "message": f"A {v['violation_type']} violation was recorded. Fine: LKR {v['fine_amount']:.2f}",
+                "notification_id": hash(f"{v.get('timestamp','')}{v.get('violation_type','')}") % 100000,
+                "title": f"{v.get('violation_type','').replace('_', ' ').title()} Recorded",
+                "message": f"A {v.get('violation_type','')} violation was recorded. Fine: LKR {v.get('fine_amount',0):.2f}",
                 "notification_type": "violation",
-                "timestamp": v["timestamp"],
+                "timestamp": v.get("timestamp", ""),
                 "read": False,
             })
-        
-        # Sort by timestamp and limit
-        notifications.sort(key=lambda x: x["timestamp"], reverse=True)
-        notifications = notifications[:limit]
-        
-        return {
-            "notifications": notifications,
-            "unread_count": sum(1 for n in notifications if not n["read"]),
-            "total_count": len(notifications),
-        }
+
+    # Sort by timestamp desc and limit
+    notifications.sort(key=lambda x: x["timestamp"], reverse=True)
+    notifications = notifications[:limit]
+
+    return {
+        "notifications": notifications,
+        "unread_count": sum(1 for n in notifications if not n["read"]),
+        "total_count": len(notifications),
+    }
 
 
 @router.post("/notifications/{notification_id}/read", summary="Mark notification as read")
 async def mark_notification_read(
-    notification_id: int,
+    notification_id: str,
     user: UserInfo = Depends(get_current_driver),
 ):
     """Mark a specific notification as read."""
-    async with aiosqlite.connect(str(DB_PATH)) as db:
-        await db.execute(
-            "UPDATE driver_notifications SET read = 1 WHERE id = ?",
-            (notification_id,)
-        )
-        await db.commit()
-    
+    db = get_db()
+    await db.collection(Collections.DRIVER_NOTIFICATIONS).document(notification_id).update(
+        {"read": True}
+    )
     return {"status": "marked_read", "notification_id": notification_id}
 
 
@@ -388,45 +434,91 @@ async def get_score_history(
     Shows how score has changed with each violation.
     """
     plate_number = await get_plate_from_token(user)
-    
-    async with aiosqlite.connect(str(DB_PATH)) as db:
-        db.row_factory = aiosqlite.Row
-        
-        # Get violations with points to calculate historical scores
-        cursor = await db.execute(
-            """SELECT timestamp, points_deducted, violation_type
-               FROM violations 
-               WHERE (driver_id = ? OR license_plate = ?)
-               ORDER BY timestamp ASC""",
-            (plate_number, plate_number)
-        )
-        violations = await cursor.fetchall()
-        
-        # Build score history
-        score_history = []
-        current_score = 100
-        
-        for v in violations:
-            current_score = max(0, current_score - v["points_deducted"])
-            score_history.append({
-                "timestamp": v["timestamp"],
-                "score": current_score,
-                "change": -v["points_deducted"],
-                "reason": v["violation_type"],
-            })
-        
-        # Get current score
-        cursor = await db.execute(
-            "SELECT current_score FROM drivers WHERE driver_id = ?",
-            (plate_number,)
-        )
-        driver = await cursor.fetchone()
-        final_score = driver["current_score"] if driver else current_score
-        
-        return {
-            "current_score": final_score,
-            "history": score_history[-50:],  # Last 50 entries
-            "trend": "stable" if len(score_history) < 2 else (
-                "improving" if score_history[-1]["score"] > score_history[0]["score"] else "declining"
-            ),
-        }
+    db = get_db()
+
+    # Get violations with points to calculate historical scores
+    violations = []
+    for field_name in ("driver_id", "license_plate"):
+        q = db.collection(Collections.VIOLATIONS).where(
+            filter=FieldFilter(field_name, "==", plate_number)
+        ).order_by("timestamp")
+        async for doc in q.stream():
+            d = doc.to_dict()
+            d["_id"] = doc.id
+            violations.append(d)
+
+    # Deduplicate and sort by timestamp ascending
+    seen = set()
+    unique = []
+    for v in violations:
+        if v["_id"] not in seen:
+            seen.add(v["_id"])
+            unique.append(v)
+    unique.sort(key=lambda x: x.get("timestamp", ""))
+
+    # Build score history
+    score_history = []
+    current_score = 100
+    for v in unique:
+        pts = v.get("points_deducted", 0)
+        current_score = max(0, current_score - pts)
+        score_history.append({
+            "timestamp": v.get("timestamp", ""),
+            "score": current_score,
+            "change": -pts,
+            "reason": v.get("violation_type", ""),
+        })
+
+    # Get current score from drivers collection
+    driver_doc = await db.collection(Collections.DRIVERS).document(plate_number).get()
+    final_score = driver_doc.to_dict().get("current_score", current_score) if driver_doc.exists else current_score
+
+    return {
+        "current_score": final_score,
+        "history": score_history[-50:],
+        "trend": "stable" if len(score_history) < 2 else (
+            "improving" if score_history[-1]["score"] > score_history[0]["score"] else "declining"
+        ),
+    }
+
+
+# =============================================================================
+# FCM TOKEN REGISTRATION
+# =============================================================================
+
+@router.post("/fcm-token", summary="Register FCM push token")
+async def register_fcm_token(
+    body: FcmTokenRequest,
+    user: UserInfo = Depends(get_current_driver),
+):
+    """
+    Register or update the driver's FCM push notification token.
+    Called by the mobile app on startup and token refresh.
+    """
+    plate_number = await get_plate_from_token(user)
+    if not plate_number:
+        raise HTTPException(status_code=404, detail="Driver not found")
+
+    db = get_db()
+    # Use plate_number as document ID for uniqueness (upsert)
+    await db.collection(Collections.DRIVER_FCM_TOKENS).document(plate_number).set({
+        "plate_number": plate_number,
+        "fcm_token": body.fcm_token,
+        "platform": body.platform,
+        "updated_at": datetime.now().isoformat(),
+    })
+
+    return {"status": "ok", "message": "FCM token registered"}
+
+
+@router.delete("/fcm-token", summary="Remove FCM push token")
+async def remove_fcm_token(
+    user: UserInfo = Depends(get_current_driver),
+):
+    """Remove driver's FCM token (e.g. on logout)."""
+    plate_number = await get_plate_from_token(user)
+
+    db = get_db()
+    await db.collection(Collections.DRIVER_FCM_TOKENS).document(plate_number).delete()
+
+    return {"status": "ok", "message": "FCM token removed"}

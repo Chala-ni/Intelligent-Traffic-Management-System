@@ -18,6 +18,9 @@ __pycache__/
 *.sqlite
 *.db
 
+# Firebase service account (secrets)
+firebase-service-account.json
+
 # Training outputs and models
 runs/
 models/
