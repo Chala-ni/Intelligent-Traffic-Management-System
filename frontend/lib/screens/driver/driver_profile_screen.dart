@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../core/theme/app_colors.dart';
+import '../../core/services/notification_service.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/driver/driver_home_provider.dart';
 import '../../widgets/driver/score_circle.dart';
@@ -17,11 +18,17 @@ class DriverProfileScreen extends StatefulWidget {
 class _DriverProfileScreenState extends State<DriverProfileScreen> {
   List<SafetyTip> _tips = [];
   bool _loadingTips = true;
+  bool _audioNotificationsEnabled = true;
 
   @override
   void initState() {
     super.initState();
     _loadSafetyTips();
+    _loadAudioSetting();
+  }
+  
+  void _loadAudioSetting() {
+    _audioNotificationsEnabled = NotificationService().isTtsEnabled;
   }
 
   Future<void> _loadSafetyTips() async {
@@ -508,7 +515,7 @@ class _DriverProfileScreenState extends State<DriverProfileScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Text(
-                  'LiveSafe Score',
+                  'Driver Safety Score',
                   style: TextStyle(
                     color: AppColors.textSecondary,
                     fontSize: 12,
@@ -661,6 +668,14 @@ class _DriverProfileScreenState extends State<DriverProfileScreen> {
           onTap: () {
             final user = context.read<AuthProvider>().user;
             _showEditProfileDialog(context, user);
+          },
+        ),
+        // Audio notifications toggle
+        _AudioToggleTile(
+          enabled: _audioNotificationsEnabled,
+          onChanged: (value) async {
+            await NotificationService().setTtsEnabled(value);
+            setState(() => _audioNotificationsEnabled = value);
           },
         ),
         _ActionTile(
@@ -842,6 +857,67 @@ class _ActionTile extends StatelessWidget {
                 color: AppColors.textSecondary.withOpacity(0.5), size: 20),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// Toggle tile for audio notifications setting
+class _AudioToggleTile extends StatelessWidget {
+  final bool enabled;
+  final ValueChanged<bool> onChanged;
+
+  const _AudioToggleTile({
+    required this.enabled,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.border.withOpacity(0.3)),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            enabled ? Icons.volume_up : Icons.volume_off,
+            color: enabled ? AppColors.primary : AppColors.textSecondary,
+            size: 22,
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: const [
+                Text(
+                  'Audio Notifications',
+                  style: TextStyle(
+                    color: AppColors.textPrimary,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                Text(
+                  'Speak violation alerts aloud',
+                  style: TextStyle(
+                    color: AppColors.textSecondary,
+                    fontSize: 11,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Switch(
+            value: enabled,
+            onChanged: onChanged,
+            activeColor: AppColors.primary,
+          ),
+        ],
       ),
     );
   }

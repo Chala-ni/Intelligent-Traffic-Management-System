@@ -214,16 +214,25 @@ class DriverHomeProvider with ChangeNotifier {
   }
 
   /// Mark a notification as read
-  Future<void> markNotificationRead(int notificationId) async {
+  Future<void> markNotificationRead(String notificationId) async {
     try {
       await _apiClient.post(
-        ApiEndpoints.markNotificationRead(notificationId),
+        '/driver/notifications/$notificationId/read',
       );
       final idx = _notifications.indexWhere(
         (n) => n.notificationId == notificationId,
       );
       if (idx != -1) {
         _unreadCount = (_unreadCount - 1).clamp(0, _notifications.length);
+        // Update local notification to mark as read
+        _notifications[idx] = DriverNotification(
+          notificationId: _notifications[idx].notificationId,
+          title: _notifications[idx].title,
+          message: _notifications[idx].message,
+          notificationType: _notifications[idx].notificationType,
+          timestamp: _notifications[idx].timestamp,
+          read: true,
+        );
         notifyListeners();
       }
     } catch (e) {

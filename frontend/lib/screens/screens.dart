@@ -18,6 +18,10 @@ export 'admin/drivers/driver_detail_screen.dart';
 
 // Admin - Analytics
 export 'admin/analytics/analytics_screen.dart';
+export 'admin/analytics/risk_analytics_screen.dart';
+
+// Admin - Settings
+export 'admin/settings/admin_settings_screen.dart';
 
 // Splash
 export 'splash/splash_screen.dart';

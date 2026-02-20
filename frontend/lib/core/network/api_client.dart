@@ -174,6 +174,35 @@ class ApiClient {
     }
   }
 
+  /// PATCH request
+  Future<ApiResponse<Map<String, dynamic>>> patch(
+    String endpoint, {
+    Map<String, dynamic>? body,
+    Map<String, dynamic>? queryParams,
+    bool requiresAuth = true,
+  }) async {
+    try {
+      var uri = Uri.parse('$baseUrl$endpoint');
+      if (queryParams != null) {
+        uri = uri.replace(queryParameters: queryParams.map(
+          (key, value) => MapEntry(key, value.toString()),
+        ));
+      }
+
+      final response = await http
+          .patch(
+            uri,
+            headers: await _headers(requiresAuth: requiresAuth),
+            body: body != null ? jsonEncode(body) : null,
+          )
+          .timeout(AppConfig.apiTimeout);
+
+      return _handleResponse(response);
+    } catch (e) {
+      return ApiResponse.error(_handleError(e), 0);
+    }
+  }
+
   /// DELETE request
   Future<ApiResponse<Map<String, dynamic>>> delete(
     String endpoint, {

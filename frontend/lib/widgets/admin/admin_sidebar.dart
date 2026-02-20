@@ -71,6 +71,11 @@ class AdminSidebar extends StatelessWidget {
                     icon: Icons.history,
                     label: 'Audit Logs',
                   ),
+                  _buildNavItem(
+                    index: 6,
+                    icon: Icons.speed,
+                    label: 'Risk Analytics',
+                  ),
                   
                   const Padding(
                     padding: EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -78,7 +83,7 @@ class AdminSidebar extends StatelessWidget {
                   ),
                   
                   _buildNavItem(
-                    index: 6,
+                    index: 7,
                     icon: Icons.settings,
                     label: 'Settings',
                   ),
@@ -257,7 +262,35 @@ class AdminSidebar extends StatelessWidget {
                 ),
               ),
               IconButton(
-                onPressed: () => onItemSelected(5), // Logout
+                onPressed: () async {
+                  final confirmed = await showDialog<bool>(
+                    context: context,
+                    builder: (ctx) => AlertDialog(
+                      backgroundColor: AppColors.surface,
+                      title: const Text('Confirm Logout'),
+                      content: const Text('Are you sure you want to logout?'),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.of(ctx).pop(false),
+                          child: const Text('Cancel'),
+                        ),
+                        ElevatedButton(
+                          onPressed: () => Navigator.of(ctx).pop(true),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: AppColors.error,
+                          ),
+                          child: const Text('Logout'),
+                        ),
+                      ],
+                    ),
+                  );
+                  if (confirmed == true && context.mounted) {
+                    await context.read<AuthProvider>().logout();
+                    if (context.mounted) {
+                      Navigator.of(context).pushReplacementNamed('/');
+                    }
+                  }
+                },
                 icon: const Icon(Icons.logout),
                 color: AppColors.textSecondary,
                 tooltip: 'Logout',

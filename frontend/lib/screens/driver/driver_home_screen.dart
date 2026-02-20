@@ -370,6 +370,15 @@ class _DriverHomeScreenState extends State<DriverHomeScreen> {
                 Row(
                   children: [
                     _MiniChip(
+                      label: junction.safetyColor,
+                      color: junction.safetyColor == 'GREEN'
+                          ? AppColors.success
+                          : junction.safetyColor == 'YELLOW'
+                              ? AppColors.warning
+                              : AppColors.error,
+                    ),
+                    const SizedBox(width: 8),
+                    _MiniChip(
                       label: junction.displayTrafficLevel,
                       color: _getTrafficColor(junction.trafficLevel),
                     ),
@@ -524,7 +533,13 @@ class _DriverHomeScreenState extends State<DriverHomeScreen> {
                           itemCount: provider.notifications.length,
                           itemBuilder: (context, index) {
                             final notif = provider.notifications[index];
-                            return Container(
+                            return GestureDetector(
+                              onTap: () {
+                                if (!notif.read) {
+                                  provider.markNotificationRead(notif.notificationId);
+                                }
+                              },
+                              child: Container(
                               margin: const EdgeInsets.only(bottom: 8),
                               padding: const EdgeInsets.all(14),
                               decoration: BoxDecoration(
@@ -584,6 +599,7 @@ class _DriverHomeScreenState extends State<DriverHomeScreen> {
                                   ),
                                 ],
                               ),
+                            ),
                             );
                           },
                         ),

@@ -341,6 +341,11 @@ async def register_driver(data: DriverRegister):
 
     # 2. Check plate_number uniqueness
     plate = data.plate_number.upper()
+    
+    # Also store a normalized version (no spaces/hyphens) for matching
+    from app.utils.plate_utils import normalize_plate
+    plate_normalized = normalize_plate(plate)
+    
     plate_query = (
         db.collection(Collections.DRIVER_USERS)
         .where(filter=FieldFilter("plate_number", "==", plate))
@@ -350,6 +355,18 @@ async def register_driver(data: DriverRegister):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Vehicle plate number already registered"
+        )
+    
+    # Also check by normalized plate to prevent duplicates like "WP ABC 1234" and "WPABC1234"
+    norm_query = (
+        db.collection(Collections.DRIVER_USERS)
+        .where(filter=FieldFilter("plate_number_normalized", "==", plate_normalized))
+        .limit(1)
+    )
+    async for doc in norm_query.stream():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Vehicle plate number already registered (normalized match)"
         )
 
     # 3. Check license_number uniqueness (if provided)
@@ -376,6 +393,7 @@ async def register_driver(data: DriverRegister):
         "phone": data.phone,
         "password_hash": password_hash,
         "plate_number": plate,
+        "plate_number_normalized": plate_normalized,
         "name": data.name,
         "license_number": data.license_number,
         "created_at": datetime.utcnow().isoformat(),
@@ -383,11 +401,12 @@ async def register_driver(data: DriverRegister):
     })
 
     # Ensure drivers collection entry exists
-    driver_ref = db.collection(Collections.DRIVERS).document(plate)
+    driver_ref = db.collection(Collections.DRIVERS).document(plate_normalized)
     driver_doc = await driver_ref.get()
     if not driver_doc.exists:
         await driver_ref.set({
-            "driver_id": plate,
+            "driver_id": plate_normalized,
+            "plate_number_display": plate,
             "current_score": 100,
             "total_violations": 0,
             "total_fines": 0,

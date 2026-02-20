@@ -6,6 +6,8 @@ import '../../../core/theme/app_typography.dart';
 import '../../../providers/admin/analytics_provider.dart';
 import '../../../widgets/admin/admin_sidebar.dart';
 import '../../../widgets/common/loading_widget.dart';
+import '../../../core/network/api_client.dart';
+import '../../../core/network/api_endpoints.dart';
 
 class AnalyticsScreen extends StatefulWidget {
   const AnalyticsScreen({super.key});
@@ -15,12 +17,25 @@ class AnalyticsScreen extends StatefulWidget {
 }
 
 class _AnalyticsScreenState extends State<AnalyticsScreen> {
+  final ApiClient _apiClient = ApiClient();
+  Map<String, dynamic>? _junctionScore;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       context.read<AnalyticsProvider>().loadAllAnalytics();
+      _loadJunctionScore();
     });
+  }
+
+  Future<void> _loadJunctionScore() async {
+    try {
+      final response = await _apiClient.get(ApiEndpoints.junctionScore);
+      if (mounted && response.success && response.data != null) {
+        setState(() => _junctionScore = response.data);
+      }
+    } catch (_) {}
   }
 
   @override
@@ -53,6 +68,21 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
     );
   }
 
+  String _formatNumber(double value) {
+    if (value >= 1000000) {
+      return '${(value / 1000000).toStringAsFixed(1)}M';
+    } else if (value >= 1000) {
+      final formatted = value.toStringAsFixed(0);
+      final result = StringBuffer();
+      for (int i = 0; i < formatted.length; i++) {
+        if (i > 0 && (formatted.length - i) % 3 == 0) result.write(',');
+        result.write(formatted[i]);
+      }
+      return result.toString();
+    }
+    return value.toStringAsFixed(0);
+  }
+
   void _handleNavigation(int index) {
     switch (index) {
       case 0:
@@ -74,6 +104,9 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
         Navigator.of(context).pushReplacementNamed('/admin/logs');
         break;
       case 6:
+        Navigator.of(context).pushReplacementNamed('/admin/risk');
+        break;
+      case 7:
         Navigator.of(context).pushReplacementNamed('/admin/settings');
         break;
     }
@@ -165,6 +198,10 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
           child: Row(
             children: [
               Expanded(
+                child: _buildJunctionSafetyCard(),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
                 child: _buildStatCard(
                   'Violations Today',
                   stats.violationsToday.toString(),
@@ -184,9 +221,9 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
               const SizedBox(width: 16),
               Expanded(
                 child: _buildStatCard(
-                  'Avg Risk Score',
+                  'Avg Driver Risk',
                   '${stats.averageRiskScore.toStringAsFixed(1)}%',
-                  Icons.speed,
+                  Icons.warning_amber,
                   stats.averageRiskScore > 50 ? AppColors.error : AppColors.success,
                 ),
               ),
@@ -194,7 +231,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
               Expanded(
                 child: _buildStatCard(
                   'Pending Fines',
-                  '\$${stats.pendingFines.toStringAsFixed(0)}',
+                  'LKR ${_formatNumber(stats.pendingFines)}',
                   Icons.attach_money,
                   AppColors.primary,
                 ),
@@ -203,6 +240,26 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
           ),
         );
       },
+    );
+  }
+
+  Widget _buildJunctionSafetyCard() {
+    final score = _junctionScore?['current_score'] ?? 0;
+    final safetyColor = _junctionScore?['safety_color'] ?? 'GREEN';
+    Color color;
+    // Match proposal thresholds: Green(>=70), Yellow(>=40), Red(<40)
+    if (score >= 70) {
+      color = AppColors.success;
+    } else if (score >= 40) {
+      color = AppColors.warning;
+    } else {
+      color = AppColors.error;
+    }
+    return _buildStatCard(
+      'Junction Safety ($safetyColor)',
+      '$score%',
+      Icons.shield,
+      color,
     );
   }
 
@@ -242,10 +299,15 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
                   ),
                 ),
                 const SizedBox(height: 4),
-                Text(
-                  value,
-                  style: AppTypography.h3.copyWith(
-                    fontWeight: FontWeight.bold,
+                FittedBox(
+                  fit: BoxFit.scaleDown,
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    value,
+                    style: AppTypography.h3.copyWith(
+                      fontWeight: FontWeight.bold,
+                    ),
+                    maxLines: 1,
                   ),
                 ),
               ],

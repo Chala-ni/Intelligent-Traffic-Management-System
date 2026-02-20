@@ -107,3 +107,5 @@ class Collections:
     JUNCTION_SAFETY = "junction_safety"
     COMMUNITY_ALERTS = "community_alerts"
     EMERGENCY_STATUS = "emergency_status"
+    CONFIG = "config"  # System configuration (stop line, etc.)
+    SETTINGS = "settings"  # System settings (fines, penalties, thresholds)

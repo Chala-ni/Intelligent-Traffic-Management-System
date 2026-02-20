@@ -4,7 +4,10 @@ Main entry point with health checks, SSE endpoints, and API routing
 """
 
 import asyncio
+import logging
+import sys
 from datetime import datetime
+from pathlib import Path
 from typing import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -24,9 +27,60 @@ from app.routers.driver import router as driver_router
 from app.routers.admin import router as admin_router
 from app.routers.community import router as community_router
 from app.routers.config import router as config_router
+from app.routers.settings import router as settings_router
+from app.routers.risk import router as risk_router
 from app.db.database import init_db
 
 settings = get_settings()
+
+# --- Setup Logging to File ---
+# Log file path - clears on server restart
+LOG_DIR = Path(settings.data_dir) / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_FILE = LOG_DIR / "server.log"
+
+# Clear log file on startup (overwrite mode)
+with open(LOG_FILE, "w") as f:
+    f.write(f"=== ITMS Server Log Started at {datetime.now().isoformat()} ===\n\n")
+
+# Configure logging to write to both file and console
+class TeeStream:
+    """Tee stream that writes to both console and file."""
+    def __init__(self, file_path: Path, original_stream):
+        self.file = open(file_path, "a", encoding="utf-8", buffering=1)
+        self.original = original_stream
+    
+    def write(self, data):
+        self.original.write(data)
+        try:
+            self.file.write(data)
+            self.file.flush()
+        except Exception:
+            pass  # Ignore file write errors
+    
+    def flush(self):
+        self.original.flush()
+        try:
+            self.file.flush()
+        except Exception:
+            pass
+
+# Redirect stdout and stderr to also write to log file
+sys.stdout = TeeStream(LOG_FILE, sys.__stdout__)
+sys.stderr = TeeStream(LOG_FILE, sys.__stderr__)
+
+# Configure uvicorn/fastapi loggers to also write to log file
+file_handler = logging.FileHandler(LOG_FILE, mode='a', encoding='utf-8')
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+
+# Add file handler to uvicorn and fastapi loggers
+for logger_name in ['uvicorn', 'uvicorn.error', 'uvicorn.access', 'fastapi']:
+    logger = logging.getLogger(logger_name)
+    logger.addHandler(file_handler)
+    logger.setLevel(logging.DEBUG)
+
+print(f"📝 Server logs: {LOG_FILE}")
 
 # --- Event Queue for SSE ---
 # Simple in-memory queue for broadcasting events to connected clients
@@ -48,6 +102,10 @@ async def lifespan(app: FastAPI):
         # Seed default admin user if Firestore is empty
         from app.routers.auth import ensure_tables_exist
         await ensure_tables_exist()
+        
+        # Initialize dynamic fine calculator with saved settings
+        from app.routers.settings import initialize_fine_calculator
+        await initialize_fine_calculator()
     except Exception as e:
         print(f"⚠️ Database init failed: {e}")
 
@@ -59,6 +117,8 @@ async def lifespan(app: FastAPI):
             from app.detection.yolo_detector import (
                 load_vehicle_model, load_plate_model, get_ocr_service,
                 get_scoring_engine, get_tts_service as get_detector_tts,
+                get_lane_weaving_service, get_behavior_service,
+                load_stop_line_config,
             )
             print("🔄 Pre-loading YOLO vehicle model...")
             load_vehicle_model("cpu")
@@ -70,6 +130,9 @@ async def lifespan(app: FastAPI):
 
             print("🔄 Pre-loading EasyOCR...")
             get_ocr_service()
+            # Also directly initialize the OCR reader itself
+            from app.services.ocr_service import get_ocr_reader
+            get_ocr_reader()
             print("✅ EasyOCR pre-loaded")
 
             print("🔄 Pre-loading scoring engine...")
@@ -79,6 +142,18 @@ async def lifespan(app: FastAPI):
             print("🔄 Pre-loading TTS service...")
             get_detector_tts()
             print("✅ TTS service pre-loaded")
+
+            print("🔄 Pre-loading lane weaving service (Member 2)...")
+            get_lane_weaving_service()
+            print("✅ Lane weaving service pre-loaded")
+
+            print("🔄 Pre-loading behavior detection service (Member 4)...")
+            get_behavior_service()
+            print("✅ Behavior detection service pre-loaded")
+            
+            print("🔄 Loading stop line configuration...")
+            load_stop_line_config()
+            print("✅ Stop line config loaded")
 
             print("🎉 All models and services pre-loaded successfully!")
         except Exception as e:
@@ -141,6 +216,8 @@ app.include_router(driver_router)     # Driver mobile app endpoints
 app.include_router(admin_router)      # Admin dashboard endpoints
 app.include_router(community_router)  # Public community endpoints
 app.include_router(config_router)     # Admin zone configuration & audit logs
+app.include_router(settings_router)   # Admin system settings
+app.include_router(risk_router)       # Member 4: Accident Risk Prediction
 
 # --- Static Files (for simulation UI and videos) ---
 from pathlib import Path
@@ -321,19 +398,45 @@ async def pipeline_status():
 
 
 # =============================================================================
-# Error Handlers
+# Server Logs Endpoint (Admin Only)
 # =============================================================================
 
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    """Global exception handler for unhandled errors."""
-    return JSONResponse(
-        status_code=500,
-        content={
-            "error": "Internal server error",
-            "detail": str(exc) if settings.debug else "An error occurred",
-        },
-    )
+@app.get("/admin/server-logs", tags=["Admin"])
+async def get_server_logs(
+    lines: int = 500,
+):
+    """
+    Get the last N lines of the server log file.
+    Useful for debugging and monitoring.
+    """
+    try:
+        if LOG_FILE.exists():
+            with open(LOG_FILE, "r", encoding="utf-8", errors="ignore") as f:
+                all_lines = f.readlines()
+            # Return last N lines
+            recent_lines = all_lines[-lines:] if len(all_lines) > lines else all_lines
+            return {
+                "log_file": str(LOG_FILE),
+                "total_lines": len(all_lines),
+                "returned_lines": len(recent_lines),
+                "content": "".join(recent_lines)
+            }
+        else:
+            return {"error": "Log file not found", "log_file": str(LOG_FILE)}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/admin/server-logs/download", tags=["Admin"])
+async def download_server_logs():
+    """Download the full server log file."""
+    if LOG_FILE.exists():
+        return FileResponse(
+            path=str(LOG_FILE),
+            filename=f"itms_server_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log",
+            media_type="text/plain"
+        )
+    return {"error": "Log file not found"}
 
 
 # =============================================================================

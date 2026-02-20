@@ -97,6 +97,22 @@ class StatsResponse(BaseModel):
     pending_fines: float
 
 
+class StopLineConfig(BaseModel):
+    """Configuration for the red light stop line."""
+    y_position: float = 0.6  # Ratio from top (0-1)
+    x_start: float = 0.0     # Left boundary as ratio (0-1)
+    x_end: float = 0.5       # Right boundary as ratio (0-1) - only main lane
+    active: bool = True
+
+
+class StopLineResponse(BaseModel):
+    y_position: float
+    x_start: float
+    x_end: float
+    active: bool
+    updated_at: str
+
+
 # =============================================================================
 # DATABASE HELPERS
 # =============================================================================
@@ -322,6 +338,111 @@ async def delete_zone(
 
 
 # =============================================================================
+# STOP LINE CONFIGURATION ENDPOINTS
+# =============================================================================
+
+# Default stop line config document ID
+STOP_LINE_DOC_ID = "main_stop_line"
+
+
+def _reload_stop_line_in_detector():
+    """Reload stop line configuration into the live detection system."""
+    try:
+        from app.detection.yolo_detector import load_stop_line_config
+        load_stop_line_config()
+    except Exception as e:
+        print(f"[STOP_LINE] Warning: Could not reload stop line in detector: {e}")
+
+
+@router.get("/stop-line", response_model=StopLineResponse, summary="Get stop line configuration")
+async def get_stop_line_config(
+    user: UserInfo = Depends(get_current_admin)
+):
+    """
+    Get the current red light stop line configuration.
+    Defines the y position and x boundaries for the monitored lane.
+    """
+    db = get_db()
+    doc = await db.collection(Collections.CONFIG).document(STOP_LINE_DOC_ID).get()
+    
+    if doc.exists:
+        data = doc.to_dict()
+        return StopLineResponse(
+            y_position=data.get("y_position", 0.6),
+            x_start=data.get("x_start", 0.0),
+            x_end=data.get("x_end", 1.0),
+            active=data.get("active", True),
+            updated_at=str(data.get("updated_at", "")),
+        )
+    else:
+        # Return defaults
+        return StopLineResponse(
+            y_position=0.6,
+            x_start=0.0,
+            x_end=1.0,
+            active=True,
+            updated_at="",
+        )
+
+
+@router.put("/stop-line", response_model=StopLineResponse, summary="Update stop line configuration")
+async def update_stop_line_config(
+    config: StopLineConfig,
+    user: UserInfo = Depends(get_current_admin)
+):
+    """
+    Update the red light stop line configuration.
+    
+    - y_position: Vertical position as ratio (0=top, 1=bottom). Default 0.6.
+    - x_start: Left boundary as ratio (0=left edge). Default 0.0.
+    - x_end: Right boundary as ratio (1=right edge). Default 0.5 for main lane only.
+    - active: Whether red light detection is enabled.
+    
+    Only vehicles within the x_start to x_end horizontal range will be
+    checked for red light violations. This prevents false positives from
+    vehicles in opposite lanes.
+    """
+    db = get_db()
+    
+    # Validate ranges
+    if not (0 <= config.y_position <= 1):
+        raise HTTPException(status_code=400, detail="y_position must be between 0 and 1")
+    if not (0 <= config.x_start <= 1):
+        raise HTTPException(status_code=400, detail="x_start must be between 0 and 1")
+    if not (0 <= config.x_end <= 1):
+        raise HTTPException(status_code=400, detail="x_end must be between 0 and 1")
+    if config.x_start >= config.x_end:
+        raise HTTPException(status_code=400, detail="x_start must be less than x_end")
+    
+    now = datetime.now().isoformat()
+    
+    await db.collection(Collections.CONFIG).document(STOP_LINE_DOC_ID).set({
+        "y_position": config.y_position,
+        "x_start": config.x_start,
+        "x_end": config.x_end,
+        "active": config.active,
+        "updated_at": now,
+    })
+    
+    await log_action(
+        user.identifier, 
+        "Updated Stop Line", 
+        f"Y: {config.y_position:.2f}, X: {config.x_start:.2f}-{config.x_end:.2f}"
+    )
+    
+    # Reload in detector
+    _reload_stop_line_in_detector()
+    
+    return StopLineResponse(
+        y_position=config.y_position,
+        x_start=config.x_start,
+        x_end=config.x_end,
+        active=config.active,
+        updated_at=now,
+    )
+
+
+# =============================================================================
 # AUDIT LOG ENDPOINTS
 # =============================================================================
 
@@ -503,3 +624,58 @@ async def get_dashboard_stats(
         total_drivers=total_drivers,
         pending_fines=pending_fines,
     )
+
+
+# =============================================================================
+# TTS TEST ENDPOINT
+# =============================================================================
+
+@router.post("/tts/test", summary="Test TTS audio playback")
+async def test_tts_playback(
+    message: str = Query(default="Testing audio playback system.", description="Message to speak"),
+    user: UserInfo = Depends(get_current_admin),
+):
+    """
+    Test the TTS (Text-to-Speech) system by generating and playing an audio message.
+    This helps diagnose audio playback issues.
+    """
+    from app.tts.tts_service import get_tts_service, is_tts_paused, WARNINGS_DIR
+    
+    tts = get_tts_service()
+    
+    # Get TTS status
+    status_info = {
+        "tts_paused": is_tts_paused(),
+        "edge_tts_available": tts._edge_tts_available,
+        "pyttsx3_available": tts._pyttsx3_available,
+        "warnings_dir": str(WARNINGS_DIR),
+        "warnings_count": tts.get_warning_count(),
+    }
+    
+    # Try to generate and play
+    import time
+    timestamp = int(time.time())
+    filename = f"test_audio_{timestamp}"
+    
+    try:
+        filepath = tts.generate_warning(
+            message,
+            filename=filename,
+            play_immediately=True
+        )
+        
+        if filepath:
+            status_info["generated_file"] = str(filepath)
+            status_info["file_size"] = filepath.stat().st_size if filepath.exists() else 0
+            status_info["status"] = "success"
+            status_info["message"] = "Audio generated and playback initiated"
+        else:
+            status_info["status"] = "failed"
+            status_info["message"] = "Failed to generate audio file"
+    except Exception as e:
+        status_info["status"] = "error"
+        status_info["error"] = str(e)
+    
+    await log_action(user.username, "tts_test", f"Tested TTS: {message[:50]}...")
+    
+    return status_info

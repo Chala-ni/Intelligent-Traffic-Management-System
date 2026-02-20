@@ -26,6 +26,16 @@ class ApiEndpoints {
   static const String videoSnapshot = '/admin/video/snapshot';
   static const String videoSnapshotRefresh = '/admin/video/snapshot/refresh';
   static const String adminStats = '/admin/stats';
+  static const String stopLineConfig = '/admin/stop-line';
+
+  // ============== SETTINGS ENDPOINTS ==============
+  
+  static const String systemSettings = '/settings';
+  static const String fineSettings = '/settings/fines';
+  static const String junctionSafetySettings = '/settings/junction-safety';
+  static const String detectionSettings = '/settings/detection';
+  static const String parkingSettings = '/settings/parking';
+  static const String resetSettings = '/settings/reset';
 
   // ============== DRIVER ENDPOINTS ==============
   
@@ -66,4 +76,12 @@ class ApiEndpoints {
   
   static const String junctionSafety = '/junction/safety';
   static const String junctionHistory = '/junction/safety-history';
+
+  // ============== RISK PREDICTION ENDPOINTS ==============
+  
+  static const String riskCurrentScores = '/risk/current-scores';
+  static String riskVehicle(String id) => '/risk/vehicle/$id';
+  static const String riskHighRiskVehicles = '/risk/high-risk-vehicles';
+  static const String riskBehaviorLog = '/risk/behavior-log';
+  static const String riskStats = '/risk/stats';
 }

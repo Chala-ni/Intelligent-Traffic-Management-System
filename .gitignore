@@ -66,3 +66,7 @@ Thumbs.db
 secrets.json
 
 plan/
+
+*.mp3
+*.mp4
+*.jpg

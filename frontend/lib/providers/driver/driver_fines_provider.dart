@@ -102,7 +102,7 @@ class DriverFinesProvider with ChangeNotifier {
     notifyListeners();
   }
 
-  /// Mock payment processing
+  /// Process payment via backend API
   Future<bool> processPayment({
     required Fine fine,
     required String paymentMethod,
@@ -113,10 +113,7 @@ class DriverFinesProvider with ChangeNotifier {
     notifyListeners();
 
     try {
-      // Simulate payment processing delay
-      await Future.delayed(const Duration(seconds: 2));
-
-      // Mock validation
+      // Basic validation
       if (cardNumber.length < 16) {
         _paymentError = 'Invalid card number';
         _isProcessingPayment = false;
@@ -124,27 +121,42 @@ class DriverFinesProvider with ChangeNotifier {
         return false;
       }
 
-      // Mark as paid locally (mock - no real transaction)
-      final idx = _fines.indexWhere((f) => f.fineId == fine.fineId);
-      if (idx != -1) {
-        _fines[idx] = Fine(
-          fineId: fine.fineId,
-          violationType: fine.violationType,
-          amount: fine.amount,
-          issuedDate: fine.issuedDate,
-          dueDate: fine.dueDate,
-          status: 'paid',
-          breakdown: fine.breakdown,
-        );
-        _totalUnpaid = _fines
-            .where((f) => !f.isPaid)
-            .fold(0.0, (sum, f) => sum + f.amount);
-        _lastPaidFine = _fines[idx];
-      }
+      // Call backend API to process payment
+      final response = await _apiClient.post(
+        '/driver/fines/${fine.fineId}/pay',
+        body: {
+          'payment_method': paymentMethod,
+        },
+      );
 
-      _isProcessingPayment = false;
-      notifyListeners();
-      return true;
+      if (response.success) {
+        // Update local state
+        final idx = _fines.indexWhere((f) => f.fineId == fine.fineId);
+        if (idx != -1) {
+          _fines[idx] = Fine(
+            fineId: fine.fineId,
+            violationType: fine.violationType,
+            amount: fine.amount,
+            issuedDate: fine.issuedDate,
+            dueDate: fine.dueDate,
+            status: 'paid',
+            breakdown: fine.breakdown,
+          );
+          _totalUnpaid = _fines
+              .where((f) => !f.isPaid)
+              .fold(0.0, (sum, f) => sum + f.amount);
+          _lastPaidFine = _fines[idx];
+        }
+
+        _isProcessingPayment = false;
+        notifyListeners();
+        return true;
+      } else {
+        _paymentError = response.error ?? 'Payment failed';
+        _isProcessingPayment = false;
+        notifyListeners();
+        return false;
+      }
     } catch (e) {
       _paymentError = e.toString();
       _isProcessingPayment = false;

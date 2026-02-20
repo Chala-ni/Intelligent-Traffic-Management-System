@@ -95,6 +95,9 @@ class _DriversListScreenState extends State<DriversListScreen> {
         Navigator.of(context).pushReplacementNamed('/admin/logs');
         break;
       case 6:
+        Navigator.of(context).pushReplacementNamed('/admin/risk');
+        break;
+      case 7:
         Navigator.of(context).pushReplacementNamed('/admin/settings');
         break;
     }
@@ -289,8 +292,20 @@ class _DriversListScreenState extends State<DriversListScreen> {
               // Header with score gauge
               Row(
                 children: [
-                  // Score circle
-                  _buildScoreCircle(driver.currentScore, driver.riskLevel),
+                  // Score circle with label
+                  Column(
+                    children: [
+                      _buildScoreCircle(driver.currentScore, driver.riskLevel),
+                      const SizedBox(height: 4),
+                      Text(
+                        'Safety',
+                        style: AppTypography.caption.copyWith(
+                          color: AppColors.textSecondary,
+                          fontSize: 10,
+                        ),
+                      ),
+                    ],
+                  ),
                   const SizedBox(width: 16),
                   
                   // Driver ID
@@ -343,7 +358,7 @@ class _DriversListScreenState extends State<DriversListScreen> {
                     ),
                     _buildStatItem(
                       icon: Icons.attach_money,
-                      value: '\$${driver.totalFines.toStringAsFixed(0)}',
+                      value: 'LKR ${driver.totalFines.toStringAsFixed(0)}',
                       label: 'Total Fines',
                     ),
                   ],

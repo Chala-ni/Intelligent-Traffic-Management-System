@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:flutter_tts/flutter_tts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../network/api_client.dart';
 import '../network/api_endpoints.dart';
@@ -29,8 +30,14 @@ class NotificationService {
   final FlutterLocalNotificationsPlugin _localNotifications =
       FlutterLocalNotificationsPlugin();
   final ApiClient _apiClient = ApiClient();
+  
+  /// Text-to-Speech engine for audio notifications
+  final FlutterTts _tts = FlutterTts();
+  bool _ttsEnabled = true;
+  bool _ttsInitialized = false;
 
   static const String _fcmTokenKey = 'fcm_token';
+  static const String _ttsEnabledKey = 'tts_enabled';
 
   /// Android notification channel for traffic alerts
   static const AndroidNotificationChannel _channel = AndroidNotificationChannel(
@@ -102,8 +109,79 @@ class NotificationService {
     _messaging.onTokenRefresh.listen((newToken) {
       _sendTokenToServer(newToken);
     });
+    
+    // Initialize TTS
+    await _initializeTts();
 
     debugPrint('[FCM] Notification service initialized');
+  }
+  
+  /// Initialize Text-to-Speech engine
+  Future<void> _initializeTts() async {
+    try {
+      // Load TTS preference
+      final prefs = await SharedPreferences.getInstance();
+      _ttsEnabled = prefs.getBool(_ttsEnabledKey) ?? true;
+      
+      // Configure TTS engine
+      await _tts.setLanguage('en-US');
+      await _tts.setSpeechRate(0.5); // Slower for clarity
+      await _tts.setVolume(1.0);
+      await _tts.setPitch(1.0);
+      
+      _ttsInitialized = true;
+      debugPrint('[TTS] Text-to-Speech initialized, enabled: $_ttsEnabled');
+    } catch (e) {
+      debugPrint('[TTS] Failed to initialize TTS: $e');
+      _ttsInitialized = false;
+    }
+  }
+  
+  /// Enable or disable TTS for notifications
+  Future<void> setTtsEnabled(bool enabled) async {
+    _ttsEnabled = enabled;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_ttsEnabledKey, enabled);
+    debugPrint('[TTS] Audio notifications ${enabled ? "enabled" : "disabled"}');
+  }
+  
+  /// Get current TTS enabled status
+  bool get isTtsEnabled => _ttsEnabled;
+  
+  /// Speak a notification message using TTS
+  Future<void> speakNotification(String message) async {
+    if (!_ttsEnabled || !_ttsInitialized) return;
+    
+    try {
+      await _tts.stop(); // Stop any ongoing speech
+      await _tts.speak(message);
+      debugPrint('[TTS] Speaking: $message');
+    } catch (e) {
+      debugPrint('[TTS] Speak error: $e');
+    }
+  }
+  
+  /// Generate a spoken message for a violation notification
+  String _generateViolationMessage(Map<String, dynamic> data) {
+    final type = data['violation_type'] ?? 'Traffic';
+    final fineAmount = data['fine_amount'] ?? '';
+    
+    // Map violation types to spoken messages
+    final typeMessages = {
+      'red_light': 'Red light violation detected',
+      'speeding': 'Speeding violation detected',
+      'parking': 'Parking violation detected',
+      'no_parking': 'No parking zone violation',
+      'illegal_parking': 'Illegal parking detected',
+    };
+    
+    final spokenType = typeMessages[type.toString().toLowerCase()] ?? 
+        '$type violation detected';
+    
+    if (fineAmount.isNotEmpty && fineAmount != '0') {
+      return '$spokenType. Fine amount: $fineAmount rupees.';
+    }
+    return '$spokenType.';
   }
 
   /// Get the current FCM token
@@ -147,10 +225,23 @@ class NotificationService {
     }
   }
 
-  /// Handle foreground messages - show local notification
+  /// Handle foreground messages - show local notification and speak if violation
   void _handleForegroundMessage(RemoteMessage message) {
     debugPrint('[FCM] Foreground message: ${message.notification?.title}');
     _showLocalNotification(message);
+    
+    // Speak violation notifications using TTS
+    final data = message.data;
+    if (data['type'] == 'violation') {
+      final spokenMessage = _generateViolationMessage(data);
+      speakNotification(spokenMessage);
+    } else if (data['type'] == 'fine') {
+      final amount = data['amount'] ?? '';
+      speakNotification('Fine issued. Amount: $amount rupees.');
+    } else if (message.notification?.body != null) {
+      // For other notification types, speak the body
+      speakNotification(message.notification!.body!);
+    }
   }
 
   /// Handle notification tap (app in background/terminated)

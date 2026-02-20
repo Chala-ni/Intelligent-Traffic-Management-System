@@ -26,22 +26,23 @@ class ViolationType(str, Enum):
     SPEEDING = "speeding"
     RED_LIGHT = "red_light"
     WRONG_WAY = "wrong_way"
-    LANE_VIOLATION = "lane_violation"
+    LANE_WEAVING = "lane_weaving"
     RECKLESS_DRIVING = "reckless_driving"
 
 
 # Violation severity and penalty points (aligned with LiveSafeScore spec)
+# Fines are in LKR (Sri Lankan Rupees)
 VIOLATION_PENALTIES = {
-    ViolationType.PARKING_NO_PARKING: {"points": 10, "fine": 100.0, "severity": "medium"},
-    ViolationType.PARKING_NO_STOPPING: {"points": 10, "fine": 100.0, "severity": "medium"},
-    ViolationType.PARKING_OVERTIME: {"points": 5, "fine": 50.0, "severity": "low"},
-    ViolationType.PARKING_HANDICAP: {"points": 10, "fine": 200.0, "severity": "high"},
-    ViolationType.PARKING_LOADING: {"points": 10, "fine": 75.0, "severity": "low"},
-    ViolationType.SPEEDING: {"points": 8, "fine": 150.0, "severity": "medium"},
-    ViolationType.RED_LIGHT: {"points": 25, "fine": 300.0, "severity": "high"},
-    ViolationType.WRONG_WAY: {"points": 20, "fine": 500.0, "severity": "critical"},
-    ViolationType.LANE_VIOLATION: {"points": 5, "fine": 80.0, "severity": "low"},
-    ViolationType.RECKLESS_DRIVING: {"points": 25, "fine": 1000.0, "severity": "critical"},
+    ViolationType.PARKING_NO_PARKING: {"points": 10, "fine": 2500.0, "severity": "medium"},
+    ViolationType.PARKING_NO_STOPPING: {"points": 10, "fine": 2500.0, "severity": "medium"},
+    ViolationType.PARKING_OVERTIME: {"points": 5, "fine": 1500.0, "severity": "low"},
+    ViolationType.PARKING_HANDICAP: {"points": 10, "fine": 5000.0, "severity": "high"},
+    ViolationType.PARKING_LOADING: {"points": 10, "fine": 2000.0, "severity": "low"},
+    ViolationType.SPEEDING: {"points": 8, "fine": 5000.0, "severity": "medium"},
+    ViolationType.RED_LIGHT: {"points": 25, "fine": 10000.0, "severity": "high"},
+    ViolationType.WRONG_WAY: {"points": 20, "fine": 15000.0, "severity": "critical"},
+    ViolationType.LANE_WEAVING: {"points": 5, "fine": 3000.0, "severity": "low"},
+    ViolationType.RECKLESS_DRIVING: {"points": 25, "fine": 25000.0, "severity": "critical"},
 }
 
 
@@ -58,6 +59,7 @@ class ViolationRecord:
     license_plate: Optional[str] = None
     snapshot_path: Optional[str] = None
     notes: str = ""
+    fine_breakdown: Optional[dict] = None
     
     def to_dict(self) -> dict:
         return {
@@ -122,7 +124,9 @@ class DriverScore:
     
     def apply_violation(self, violation_type: ViolationType, violation_id: str = None,
                         location: str = None, license_plate: str = None,
-                        snapshot_path: str = None, notes: str = "") -> ViolationRecord:
+                        snapshot_path: str = None, notes: str = "",
+                        fine_override: float = None,
+                        fine_breakdown: dict = None) -> ViolationRecord:
         """
         Apply a violation penalty to this driver's score.
         
@@ -133,13 +137,14 @@ class DriverScore:
             license_plate: License plate if detected
             snapshot_path: Path to violation snapshot image
             notes: Additional notes
+            fine_override: Optional fine amount to use instead of default
             
         Returns:
             ViolationRecord for the applied violation
         """
         penalty = VIOLATION_PENALTIES.get(violation_type, {"points": 5, "fine": 50.0})
         points = penalty["points"]
-        fine = penalty["fine"]
+        fine = fine_override if fine_override is not None else penalty["fine"]
         
         # Apply penalty (score cannot go below 0)
         self.current_score = max(0, self.current_score - points)
@@ -159,6 +164,7 @@ class DriverScore:
             license_plate=license_plate,
             snapshot_path=snapshot_path,
             notes=notes,
+            fine_breakdown=fine_breakdown,
         )
         
         self.violation_history.append(record)
@@ -254,6 +260,8 @@ class ScoringEngine:
         license_plate: str = None,
         snapshot_path: str = None,
         notes: str = "",
+        fine_override: float = None,
+        fine_breakdown: dict = None,
     ) -> Tuple[DriverScore, ViolationRecord]:
         """
         Record a violation for a driver.
@@ -265,6 +273,8 @@ class ScoringEngine:
             license_plate: Detected license plate
             snapshot_path: Path to snapshot image
             notes: Additional notes
+            fine_override: Optional fine amount to use instead of default
+            fine_breakdown: Optional dict with fine calculation breakdown
             
         Returns:
             Tuple of (updated DriverScore, ViolationRecord)
@@ -281,6 +291,8 @@ class ScoringEngine:
             license_plate=license_plate,
             snapshot_path=snapshot_path,
             notes=notes,
+            fine_override=fine_override,
+            fine_breakdown=fine_breakdown,
         )
         
         # Persist to database
@@ -297,7 +309,7 @@ class ScoringEngine:
 
             # Insert violation record
             penalty = VIOLATION_PENALTIES.get(violation.violation_type, {"severity": "medium"})
-            db.collection(Collections.VIOLATIONS).add({
+            violation_doc = {
                 "driver_id": violation.driver_id,
                 "violation_type": violation.violation_type.value,
                 "severity": penalty.get("severity", "medium"),
@@ -309,7 +321,11 @@ class ScoringEngine:
                 "evidence_path": violation.snapshot_path,
                 "notes": violation.notes,
                 "status": "pending",
-            })
+            }
+            # Include fine breakdown if available (dynamic fine calculation details)
+            if violation.fine_breakdown:
+                violation_doc["fine_breakdown"] = violation.fine_breakdown
+            db.collection(Collections.VIOLATIONS).add(violation_doc)
 
             # Calculate actual totals from Firestore
             vio_docs = list(
@@ -319,9 +335,10 @@ class ScoringEngine:
             )
             actual_violations = len(vio_docs)
             actual_fines = sum(d.to_dict().get("fine_amount", 0) for d in vio_docs)
-
-            # Calculate score (10 points per violation, min 0)
-            calculated_score = max(0, 100 - (actual_violations * 10))
+            
+            # Calculate score by summing actual points_deducted from all violations
+            total_points_deducted = sum(d.to_dict().get("points_deducted", 0) for d in vio_docs)
+            calculated_score = max(0, 100 - total_points_deducted)
 
             # Upsert driver document (use driver_id as doc ID)
             db.collection(Collections.DRIVERS).document(driver.driver_id).set({
@@ -417,6 +434,42 @@ def get_scoring_engine() -> ScoringEngine:
     if _scoring_engine is None:
         _scoring_engine = ScoringEngine()
     return _scoring_engine
+
+
+def update_penalties_from_settings(settings_dict: dict) -> None:
+    """
+    Update VIOLATION_PENALTIES from admin settings.
+    Called when settings are saved via the Settings page so fines/points
+    take effect immediately without a server restart.
+    """
+    fines = settings_dict.get('fines', {})
+    if not fines:
+        return
+
+    mapping = {
+        'parking_no_parking': ViolationType.PARKING_NO_PARKING,
+        'parking_no_stopping': ViolationType.PARKING_NO_STOPPING,
+        'parking_overtime': ViolationType.PARKING_OVERTIME,
+        'parking_handicap': ViolationType.PARKING_HANDICAP,
+        'parking_loading': ViolationType.PARKING_LOADING,
+        'speeding': ViolationType.SPEEDING,
+        'red_light': ViolationType.RED_LIGHT,
+        'wrong_way': ViolationType.WRONG_WAY,
+        'lane_weaving': ViolationType.LANE_WEAVING,
+        'reckless_driving': ViolationType.RECKLESS_DRIVING,
+    }
+
+    for key, vtype in mapping.items():
+        entry = fines.get(key)
+        if entry and isinstance(entry, dict):
+            VIOLATION_PENALTIES[vtype] = {
+                'points': entry.get('points', VIOLATION_PENALTIES.get(vtype, {}).get('points', 5)),
+                'fine': entry.get('fine', VIOLATION_PENALTIES.get(vtype, {}).get('fine', 50.0)),
+                'severity': entry.get('severity', VIOLATION_PENALTIES.get(vtype, {}).get('severity', 'medium')),
+            }
+
+    print(f"[SCORING] VIOLATION_PENALTIES updated from settings. "
+          f"Red light fine = LKR {VIOLATION_PENALTIES[ViolationType.RED_LIGHT]['fine']}")
 
 
 # =============================================================================

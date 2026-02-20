@@ -63,16 +63,16 @@ class _LiveVideoFeedState extends State<LiveVideoFeed> {
     });
   }
 
-  /// FIX: Stats timer to fetch /video/status every 1 second for vehicle count updates
+  /// FIX: Stats timer to fetch /video/status every 3 seconds for vehicle count updates
   void _startStatsTimer() {
     _statsTimer?.cancel();
-    _statsTimer = Timer.periodic(const Duration(seconds: 1), (_) async {
+    _statsTimer = Timer.periodic(const Duration(seconds: 3), (_) async {
       if (!mounted || !_isStreaming) return;
       
       try {
         final response = await http.get(
           Uri.parse('${AppConfig.videoBaseUrl}/video/status'),
-        ).timeout(const Duration(seconds: 2));
+        ).timeout(const Duration(seconds: 5));
         
         if (!mounted) return;
         
@@ -88,11 +88,10 @@ class _LiveVideoFeedState extends State<LiveVideoFeed> {
           });
         }
       } catch (e) {
-        debugPrint('[VideoFeed] Stats fetch error: $e');
-        // Don't update state on error - just log
+        // Suppress timeout errors - non-critical polling
       }
     });
-    debugPrint('[VideoFeed] Stats timer started (1s interval)');
+    debugPrint('[VideoFeed] Stats timer started (3s interval)');
   }
 
   void _connectWebSocket() {

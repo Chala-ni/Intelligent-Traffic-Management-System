@@ -24,11 +24,13 @@ router = APIRouter(prefix="/community", tags=["Community"])
 class JunctionScore(BaseModel):
     junction_id: str
     junction_name: str
-    current_score: int
+    current_score: float
     risk_level: str
+    safety_color: str = 'GREEN'  # GREEN / YELLOW / RED (proposal)
     last_updated: str
     active_alerts: int
     traffic_level: str
+    formula: str = 'LiveSafeScore = 100 - Σ(Penalty × Severity × ContextFactor) + TimeRecovery'
 
 
 class CommunityAlert(BaseModel):
@@ -54,18 +56,15 @@ class TrafficSummary(BaseModel):
 # HELPER FUNCTIONS
 # =============================================================================
 
-def get_risk_level(score: int) -> str:
-    """Get risk level string from score."""
-    if score >= 90:
-        return "excellent"
-    elif score >= 70:
-        return "good"
-    elif score >= 50:
-        return "fair"
-    elif score >= 30:
-        return "poor"
+def get_risk_level(score) -> str:
+    """Get safety level from score — matches proposal's Green/Yellow/Red."""
+    score_val = float(score) if score is not None else 0
+    if score_val >= 70:
+        return "safe"       # Green
+    elif score_val >= 40:
+        return "caution"    # Yellow
     else:
-        return "critical"
+        return "danger"     # Red
 
 
 def get_traffic_level(density: float) -> str:
@@ -105,15 +104,36 @@ async def get_junction_score(
     traffic_level = "moderate"
     updated_at = datetime.now().isoformat()
 
-    # Get latest junction safety data
+    # First try to get live junction safety from service
+    safety_color = 'GREEN'
+    try:
+        from app.services.lane_weaving_service import get_junction_safety
+        safety = get_junction_safety()
+        if safety:
+            current_score = safety.safety_score
+            safety_color = safety.get_safety_color()
+            updated_at = datetime.now().isoformat()
+    except Exception as e:
+        pass  # Fall back to DB
+
+    # Get from DB if live service not available or for additional data
+    safety_docs = []
     q = db.collection(Collections.JUNCTION_SAFETY).where(
         filter=FieldFilter("junction_id", "==", junction_id)
-    ).order_by("updated_at", direction="DESCENDING").limit(1)
+    )
     async for doc in q.stream():
-        result = doc.to_dict()
-        current_score = result.get("current_score", 85)
+        safety_docs.append(doc.to_dict())
+    safety_docs.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
+
+    for result in safety_docs[:1]:
+        # Use safety_score or current_score field
+        db_score_val = result.get("safety_score")
+        db_score = db_score_val if db_score_val is not None else result.get("current_score", 85)
         traffic_level = get_traffic_level(result.get("traffic_density", 0.5))
-        updated_at = result.get("updated_at", updated_at)
+        # If live service didn't provide a score, use DB value
+        if current_score == 85:
+            current_score = db_score
+            updated_at = result.get("updated_at", updated_at)
 
     # Count active alerts
     active_alerts = 0
@@ -130,8 +150,9 @@ async def get_junction_score(
     return JunctionScore(
         junction_id=junction_id,
         junction_name=f"Junction {junction_id.upper()}",
-        current_score=current_score,
+        current_score=round(current_score, 1),
         risk_level=get_risk_level(current_score),
+        safety_color=safety_color,
         last_updated=updated_at,
         active_alerts=active_alerts,
         traffic_level=traffic_level,
@@ -146,10 +167,12 @@ async def get_all_junction_scores():
     junctions = []
     async for doc in db.collection(Collections.JUNCTION_SAFETY).stream():
         row = doc.to_dict()
+        score = row.get("safety_score", row.get("current_score", 85))
         junctions.append({
             "junction_id": row.get("junction_id", doc.id),
-            "current_score": row.get("current_score", 85),
-            "risk_level": get_risk_level(row.get("current_score", 85)),
+            "current_score": round(float(score), 1),
+            "risk_level": get_risk_level(score),
+            "safety_color": "GREEN" if float(score) >= 70 else ("YELLOW" if float(score) >= 40 else "RED"),
             "traffic_level": get_traffic_level(row.get("traffic_density", 0.5)),
             "last_updated": row.get("updated_at", datetime.now().isoformat()),
         })
@@ -158,7 +181,8 @@ async def get_all_junction_scores():
         junctions.append({
             "junction_id": "main",
             "current_score": 85,
-            "risk_level": "good",
+            "risk_level": "safe",
+            "safety_color": "GREEN",
             "traffic_level": "moderate",
             "last_updated": datetime.now().isoformat(),
         })
@@ -263,12 +287,15 @@ async def get_traffic_summary(
     density = 0.4
     signal_phase = "normal"
 
-    # Get latest junction data
+    # Get latest junction data (sort in Python to avoid composite index)
+    junction_docs = []
     q = db.collection(Collections.JUNCTION_SAFETY).where(
         filter=FieldFilter("junction_id", "==", junction_id)
-    ).order_by("updated_at", direction="DESCENDING").limit(1)
+    )
     async for doc in q.stream():
-        result = doc.to_dict()
+        junction_docs.append(doc.to_dict())
+    junction_docs.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
+    for result in junction_docs[:1]:
         density = result.get("traffic_density", 0.4)
 
     # Check emergency status

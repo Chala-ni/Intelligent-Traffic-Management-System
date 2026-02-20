@@ -146,18 +146,36 @@ async def get_driver_profile(user: UserInfo = Depends(get_current_driver)):
 
     driver_user = doc.to_dict()
     plate_number = driver_user.get("plate_number", "")
+    
+    # Get normalized plate for matching violations
+    from app.utils.plate_utils import normalize_plate
+    plate_norm = normalize_plate(plate_number) if plate_number else ""
 
-    # Get score from drivers collection
-    driver_doc = await db.collection(Collections.DRIVERS).document(plate_number).get()
-    if driver_doc.exists:
-        ds = driver_doc.to_dict()
-        current_score = ds.get("current_score", 100)
-        total_violations = ds.get("total_violations", 0)
-        total_fines = ds.get("total_fines", 0.0)
-    else:
-        current_score = 100
-        total_violations = 0
-        total_fines = 0.0
+    # Calculate score directly from violations for accuracy
+    total_violations = 0
+    pending_fines = 0.0  # Only unpaid fines
+    total_points_deducted = 0
+    
+    seen_ids = set()
+    # Search by original plate, normalized plate, and license_plate field
+    search_values = set(filter(None, [plate_number, plate_norm]))
+    for plate_val in search_values:
+        for field_name in ("driver_id", "license_plate"):
+            q = db.collection(Collections.VIOLATIONS).where(
+                filter=FieldFilter(field_name, "==", plate_val)
+            )
+            async for doc in q.stream():
+                if doc.id not in seen_ids:
+                    seen_ids.add(doc.id)
+                    v = doc.to_dict()
+                    total_violations += 1
+                    total_points_deducted += v.get("points_deducted", 0) or 0
+                    # Only count unpaid fines for pending amount
+                    status = (v.get("status") or "").lower()
+                    if status in ("pending", "unpaid", ""):
+                        pending_fines += v.get("fine_amount", 0) or 0
+    
+    current_score = max(0, 100 - total_points_deducted)
 
     return DriverProfile(
         user_id=doc.id,
@@ -167,7 +185,7 @@ async def get_driver_profile(user: UserInfo = Depends(get_current_driver)):
         current_score=current_score,
         risk_level=get_risk_level(current_score),
         total_violations=total_violations,
-        total_fines=total_fines,
+        total_fines=pending_fines,  # Return pending fines as total_fines for UI
         member_since=driver_user.get("created_at") or datetime.now().isoformat(),
     )
 
@@ -231,21 +249,24 @@ async def get_my_violations(
     db = get_db()
 
     # Query violations where driver_id or license_plate matches
+    # Note: Sorting in Python to avoid composite index requirements
     all_violations = []
+    seen_ids = set()
+    
     # Query by driver_id
     q1 = db.collection(Collections.VIOLATIONS).where(
         filter=FieldFilter("driver_id", "==", plate_number)
-    ).order_by("timestamp", direction="DESCENDING")
+    )
     async for doc in q1.stream():
         d = doc.to_dict()
         d["_id"] = doc.id
         all_violations.append(d)
+        seen_ids.add(doc.id)
 
     # Query by license_plate (avoid duplicates)
-    seen_ids = {v["_id"] for v in all_violations}
     q2 = db.collection(Collections.VIOLATIONS).where(
         filter=FieldFilter("license_plate", "==", plate_number)
-    ).order_by("timestamp", direction="DESCENDING")
+    )
     async for doc in q2.stream():
         if doc.id not in seen_ids:
             d = doc.to_dict()
@@ -292,19 +313,24 @@ async def get_my_fines(
 
     fines = []
 
-    # Query from dynamic_fines collection
+    # Query from dynamic_fines collection (sort in Python to avoid composite index)
+    fine_docs = []
     q = db.collection(Collections.DYNAMIC_FINES).where(
         filter=FieldFilter("plate_number", "==", plate_number)
-    ).order_by("created_at", direction="DESCENDING")
+    )
     async for doc in q.stream():
-        f = doc.to_dict()
+        fine_docs.append((doc.id, doc.to_dict()))
+    fine_docs.sort(key=lambda x: x[1].get("created_at", ""), reverse=True)
+
+    for doc_id, f in fine_docs:
+        fine_status = f.get("status", "unpaid")
         fines.append({
-            "fine_id": doc.id,
+            "fine_id": doc_id,
             "violation_type": f.get("zone_type", ""),
             "amount": f.get("total_fine", 0),
             "issued_date": f.get("created_at", ""),
             "due_date": None,
-            "status": "unpaid",
+            "status": fine_status,
             "breakdown": {
                 "base": f.get("base_penalty", 0),
                 "duration": f.get("duration_penalty", 0),
@@ -312,33 +338,52 @@ async def get_my_fines(
             },
         })
 
-    # Also get fines from violations collection
+    # Also get fines from violations collection (sort in Python)
+    vio_fines = []
+    seen_vio_ids = set()
     for field_name in ("driver_id", "license_plate"):
         q2 = db.collection(Collections.VIOLATIONS).where(
             filter=FieldFilter(field_name, "==", plate_number)
-        ).order_by("timestamp", direction="DESCENDING")
+        )
         async for doc in q2.stream():
-            v = doc.to_dict()
-            if v.get("fine_amount", 0) > 0:
-                fines.append({
-                    "fine_id": hash(doc.id) % 10000,
-                    "violation_type": v.get("violation_type", ""),
-                    "amount": v.get("fine_amount", 0),
-                    "issued_date": v.get("timestamp", ""),
-                    "due_date": None,
-                    "status": "unpaid",
-                    "breakdown": None,
-                })
+            if doc.id not in seen_vio_ids:
+                vio_fines.append((doc.id, doc.to_dict()))
+                seen_vio_ids.add(doc.id)
+    vio_fines.sort(key=lambda x: x[1].get("timestamp", ""), reverse=True)
 
-    # Deduplicate by fine_id
-    seen = set()
-    unique_fines = []
-    for f in fines:
-        fid = f["fine_id"]
-        if fid not in seen:
-            seen.add(fid)
-            unique_fines.append(f)
-    fines = unique_fines
+    for doc_id, v in vio_fines:
+        if v.get("fine_amount", 0) > 0:
+            # Use actual document ID for payment to work
+            fine_status = v.get("status", "pending")
+            # Map violation status to fine status
+            if fine_status == "paid":
+                mapped_status = "paid"
+            else:
+                mapped_status = "unpaid"
+            
+            # Build breakdown from stored fine_breakdown if available
+            fb = v.get("fine_breakdown")
+            breakdown = None
+            if fb:
+                breakdown = {
+                    "base": fb.get("base_penalty", 0),
+                    "duration": fb.get("duration_penalty", 0),
+                    "impact": fb.get("traffic_impact_penalty", 0),
+                }
+            
+            fines.append({
+                "fine_id": doc_id,  # Use real doc ID, not hash
+                "violation_type": v.get("violation_type", ""),
+                "amount": v.get("fine_amount", 0),
+                "issued_date": v.get("timestamp", ""),
+                "due_date": None,
+                "status": mapped_status,
+                "breakdown": breakdown,
+            })
+
+    # Apply status filter
+    if status_filter and status_filter != "all":
+        fines = [f for f in fines if f["status"] == status_filter]
 
     total_unpaid = sum(f["amount"] for f in fines if f["status"] == "unpaid")
 
@@ -348,6 +393,62 @@ async def get_my_fines(
         "total_unpaid_amount": total_unpaid,
         "currency": "LKR",
     }
+
+
+@router.post("/fines/{fine_id}/pay", summary="Pay a fine")
+async def pay_fine(
+    fine_id: str,
+    user: UserInfo = Depends(get_current_driver),
+):
+    """
+    Mark a fine/violation as paid.
+    In production, this would integrate with a payment gateway.
+    """
+    plate_number = await get_plate_from_token(user)
+    db = get_db()
+    
+    # Check if this is a violation ID or dynamic fine ID
+    # Try violations collection first
+    doc = await db.collection(Collections.VIOLATIONS).document(fine_id).get()
+    if doc.exists:
+        v = doc.to_dict()
+        # Verify this violation belongs to the driver
+        if v.get("driver_id") != plate_number and v.get("license_plate") != plate_number:
+            raise HTTPException(status_code=403, detail="This fine does not belong to you")
+        
+        # Update status to paid
+        await db.collection(Collections.VIOLATIONS).document(fine_id).update({
+            "status": "paid",
+            "paid_at": datetime.now().isoformat(),
+        })
+        
+        return {
+            "status": "success",
+            "message": "Fine paid successfully",
+            "fine_id": fine_id,
+            "amount": v.get("fine_amount", 0),
+        }
+    
+    # Try dynamic_fines collection
+    doc = await db.collection(Collections.DYNAMIC_FINES).document(fine_id).get()
+    if doc.exists:
+        f = doc.to_dict()
+        if f.get("plate_number") != plate_number:
+            raise HTTPException(status_code=403, detail="This fine does not belong to you")
+        
+        await db.collection(Collections.DYNAMIC_FINES).document(fine_id).update({
+            "status": "paid",
+            "paid_at": datetime.now().isoformat(),
+        })
+        
+        return {
+            "status": "success",
+            "message": "Fine paid successfully",
+            "fine_id": fine_id,
+            "amount": f.get("amount", 0),
+        }
+    
+    raise HTTPException(status_code=404, detail="Fine not found")
 
 
 @router.get("/notifications", summary="Get driver notifications")
@@ -365,18 +466,23 @@ async def get_notifications(
 
     notifications = []
 
-    # Query from driver_notifications collection
+    # Query from driver_notifications collection (sort in Python to avoid composite index)
     q = db.collection(Collections.DRIVER_NOTIFICATIONS).where(
         filter=FieldFilter("plate_number", "==", plate_number)
     )
     if unread_only:
         q = q.where(filter=FieldFilter("read", "==", False))
-    q = q.order_by("timestamp", direction="DESCENDING").limit(limit)
 
+    notif_docs = []
     async for doc in q.stream():
-        n = doc.to_dict()
+        notif_docs.append((doc.id, doc.to_dict()))
+    # Sort by timestamp descending and limit
+    notif_docs.sort(key=lambda x: x[1].get("timestamp", ""), reverse=True)
+    notif_docs = notif_docs[:limit]
+
+    for doc_id, n in notif_docs:
         notifications.append({
-            "notification_id": doc.id,
+            "notification_id": doc_id,
             "title": n.get("title", ""),
             "message": n.get("message", ""),
             "notification_type": n.get("notification_type", "info"),
@@ -384,14 +490,15 @@ async def get_notifications(
             "read": bool(n.get("read", False)),
         })
 
-    # Generate notifications from recent violations
+    # Generate notifications from recent violations (sort in Python)
+    violation_notifs = []
     for field_name in ("driver_id", "license_plate"):
         vq = db.collection(Collections.VIOLATIONS).where(
             filter=FieldFilter(field_name, "==", plate_number)
-        ).order_by("timestamp", direction="DESCENDING").limit(10)
+        )
         async for doc in vq.stream():
             v = doc.to_dict()
-            notifications.append({
+            violation_notifs.append({
                 "notification_id": hash(f"{v.get('timestamp','')}{v.get('violation_type','')}") % 100000,
                 "title": f"{v.get('violation_type','').replace('_', ' ').title()} Recorded",
                 "message": f"A {v.get('violation_type','')} violation was recorded. Fine: LKR {v.get('fine_amount',0):.2f}",
@@ -399,6 +506,13 @@ async def get_notifications(
                 "timestamp": v.get("timestamp", ""),
                 "read": False,
             })
+
+    # Deduplicate and sort violation_notifs by timestamp desc
+    seen_ids = set()
+    for vn in violation_notifs:
+        if vn["notification_id"] not in seen_ids:
+            seen_ids.add(vn["notification_id"])
+            notifications.append(vn)
 
     # Sort by timestamp desc and limit
     notifications.sort(key=lambda x: x["timestamp"], reverse=True)
@@ -418,9 +532,26 @@ async def mark_notification_read(
 ):
     """Mark a specific notification as read."""
     db = get_db()
-    await db.collection(Collections.DRIVER_NOTIFICATIONS).document(notification_id).update(
-        {"read": True}
-    )
+    
+    # Check if notification exists first
+    doc_ref = db.collection(Collections.DRIVER_NOTIFICATIONS).document(notification_id)
+    doc = await doc_ref.get()
+    
+    if not doc.exists:
+        # Check if this is an auto-generated violation notification (numeric hash ID)
+        # These are ephemeral and don't have Firestore documents, so we succeed silently
+        if notification_id.isdigit():
+            return {"status": "marked_read", "notification_id": notification_id, "note": "ephemeral"}
+        raise HTTPException(status_code=404, detail="Notification not found")
+    
+    # Verify the notification belongs to this user
+    notif_data = doc.to_dict()
+    plate_number = await get_plate_from_token(user)
+    notif_driver = notif_data.get("driver_id") or notif_data.get("plate_number")
+    if notif_driver != plate_number:
+        raise HTTPException(status_code=403, detail="Not authorized to access this notification")
+    
+    await doc_ref.update({"read": True})
     return {"status": "marked_read", "notification_id": notification_id}
 
 
@@ -441,7 +572,7 @@ async def get_score_history(
     for field_name in ("driver_id", "license_plate"):
         q = db.collection(Collections.VIOLATIONS).where(
             filter=FieldFilter(field_name, "==", plate_number)
-        ).order_by("timestamp")
+        )
         async for doc in q.stream():
             d = doc.to_dict()
             d["_id"] = doc.id

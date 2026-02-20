@@ -76,7 +76,8 @@ class TrafficControlApp extends StatelessWidget {
       '/admin/violations': (context) => const ViolationsListScreen(),
       '/admin/drivers': (context) => const DriversListScreen(),
       '/admin/analytics': (context) => const AnalyticsScreen(),
-      '/admin/settings': (context) => const _PlaceholderScreen(title: 'Settings'),
+      '/admin/risk': (context) => const RiskAnalyticsScreen(),
+      '/admin/settings': (context) => const AdminSettingsScreen(),
       
       // Driver routes
       '/driver/home': (context) => const DriverShellScreen(),
