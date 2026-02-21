@@ -232,8 +232,17 @@ class ApiClient {
   ApiResponse<Map<String, dynamic>> _handleResponse(http.Response response) {
     final statusCode = response.statusCode;
     
-    // CRITICAL: Throw exception on 401 to force login redirect
+    // For 401: parse the body first so login-failure messages come through
     if (statusCode == 401) {
+      try {
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+        final detail = data['detail'] ?? data['message'];
+        if (detail != null) {
+          // Return the backend's actual error (e.g. "Invalid username or password")
+          return ApiResponse.error(detail.toString(), statusCode);
+        }
+      } catch (_) {}
+      // Fallback: generic session-expired
       throw UnauthorizedException('Session expired - please login again');
     }
     

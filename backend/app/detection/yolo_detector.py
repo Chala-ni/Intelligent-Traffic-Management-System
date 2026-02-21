@@ -126,9 +126,10 @@ def update_detection_settings(settings: dict) -> None:
     if parking:
         global PARKING_WARNING_SECONDS, PARKING_VIOLATION_SECONDS
         grace = parking.get('grace_period_seconds', 30)
-        # Grace period maps to warning time; violation fires after grace
-        PARKING_WARNING_SECONDS = max(3.0, grace * 0.1)
-        PARKING_VIOLATION_SECONDS = max(PARKING_WARNING_SECONDS + 2, grace * 0.3)
+        # Warning fires at 50 % of the grace period; violation fires once the
+        # full grace period has elapsed.
+        PARKING_WARNING_SECONDS = max(3.0, grace * 0.5)
+        PARKING_VIOLATION_SECONDS = max(PARKING_WARNING_SECONDS + 2, float(grace))
         print(f"[DETECTION] Updated parking: warning={PARKING_WARNING_SECONDS}s, violation={PARKING_VIOLATION_SECONDS}s")
 
 
@@ -888,10 +889,11 @@ def _apply_parking_penalty(track_id: int, plate_text: str, zone_id: str, bbox: T
     )
     
     try:
+        zone_display_name = _get_zone_name(zone_id)
         driver, violation = scoring["engine"].record_violation(
             driver_id=driver_id,
             violation_type=violation_type,
-            location=f"zone:{zone_id}",
+            location=zone_display_name,
             license_plate=plate_text,
             snapshot_path=evidence_path,
             notes=f"Automated detection - illegal parking in {zone_type} zone",
@@ -919,6 +921,14 @@ def _get_zone_type(zone_id: str) -> str:
         if zone.get('id') == zone_id:
             return zone.get('zone_type', 'no_parking')
     return 'no_parking'
+
+
+def _get_zone_name(zone_id: str) -> str:
+    """Get the admin-configured display name for a parking zone."""
+    for zone in parking_zones:
+        if zone.get('id') == zone_id:
+            return zone.get('name') or zone_id
+    return zone_id
 
 
 def _parking_zone_to_violation_type(zone_type: str, ViolationType):

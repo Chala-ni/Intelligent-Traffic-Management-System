@@ -427,6 +427,7 @@ async def register_driver(data: DriverRegister):
         "expires_in": ACCESS_TOKEN_EXPIRE_HOURS * 3600,
         "name": data.name,
         "plate_number": plate,
+        "license_number": data.license_number,
     }
 
 
@@ -477,6 +478,7 @@ async def login_driver(data: DriverLogin):
         "expires_in": ACCESS_TOKEN_EXPIRE_HOURS * 3600,
         "name": user_doc.get("name"),
         "plate_number": user_doc.get("plate_number", ""),
+        "license_number": user_doc.get("license_number"),
     }
 
 

@@ -237,6 +237,9 @@ class _DriverProfileScreenState extends State<DriverProfileScreen> {
   void _showEditProfileDialog(BuildContext context, User? user) {
     final nameController = TextEditingController(text: user?.name ?? '');
     final phoneController = TextEditingController(text: user?.phone ?? '');
+    // Pull license number from DriverProfile if not yet in User cache
+    final profile = context.read<DriverHomeProvider>().profile;
+    final licenseNumber = user?.licenseNumber ?? profile?.licenseNumber ?? '';
     final formKey = GlobalKey<FormState>();
     bool isSaving = false;
 
@@ -361,49 +364,20 @@ class _DriverProfileScreenState extends State<DriverProfileScreen> {
                       },
                     ),
                     const SizedBox(height: 16),
-                    // Plate number (read-only info)
-                    Container(
-                      padding: const EdgeInsets.all(14),
-                      decoration: BoxDecoration(
-                        color: AppColors.background,
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: AppColors.border.withOpacity(0.3)),
-                      ),
-                      child: Row(
-                        children: [
-                          const Icon(Icons.directions_car, color: AppColors.textSecondary, size: 20),
-                          const SizedBox(width: 12),
-                          Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const Text(
-                                'Vehicle Plate',
-                                style: TextStyle(color: AppColors.textSecondary, fontSize: 11),
-                              ),
-                              Text(
-                                user?.plateNumber ?? '',
-                                style: const TextStyle(
-                                  color: AppColors.textPrimary,
-                                  fontSize: 14,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ],
-                          ),
-                          const Spacer(),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: AppColors.textSecondary.withOpacity(0.1),
-                              borderRadius: BorderRadius.circular(6),
-                            ),
-                            child: const Text(
-                              'Read-only',
-                              style: TextStyle(color: AppColors.textSecondary, fontSize: 10),
-                            ),
-                          ),
-                        ],
-                      ),
+                    // Licence number (read-only)
+                    _ReadOnlyInfoField(
+                      icon: Icons.credit_card_outlined,
+                      label: 'Licence Number',
+                      value: licenseNumber.isNotEmpty ? licenseNumber : 'Not set',
+                    ),
+                    const SizedBox(height: 12),
+                    // Vehicle plate (read-only)
+                    _ReadOnlyInfoField(
+                      icon: Icons.directions_car_outlined,
+                      label: 'Vehicle Plate',
+                      value: (user?.plateNumber ?? profile?.plateNumber ?? '').isNotEmpty
+                          ? (user?.plateNumber ?? profile?.plateNumber ?? '')
+                          : 'Not set',
                     ),
                     const SizedBox(height: 24),
                     // Save button
@@ -556,32 +530,37 @@ class _DriverProfileScreenState extends State<DriverProfileScreen> {
   }
 
   Widget _buildStatsGrid(DriverProfile? profile) {
+    final score = profile?.currentScore ?? 100;
+    final riskLevel = profile?.displayRiskLevel ?? 'Good';
+    // Pick a colour that matches the risk badge in the score card
+    final riskColor = AppColors.getScoreColor(score);
+
     return Row(
       children: [
+        Expanded(
+          child: _StatBoxe(
+            icon: Icons.shield_outlined,
+            label: 'Safety Score',
+            value: '$score pts',
+            color: riskColor,
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: _StatBoxe(
+            icon: Icons.verified_outlined,
+            label: 'Risk Level',
+            value: riskLevel,
+            color: riskColor,
+          ),
+        ),
+        const SizedBox(width: 12),
         Expanded(
           child: _StatBoxe(
             icon: Icons.warning_amber,
             label: 'Violations',
             value: '${profile?.totalViolations ?? 0}',
             color: AppColors.warning,
-          ),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: _StatBoxe(
-            icon: Icons.monetization_on,
-            label: 'Total Fines',
-            value: 'LKR ${(profile?.totalFines ?? 0).toStringAsFixed(0)}',
-            color: AppColors.error,
-          ),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: _StatBoxe(
-            icon: Icons.calendar_month,
-            label: 'Member For',
-            value: profile?.memberSinceFormatted ?? 'N/A',
-            color: AppColors.info,
           ),
         ),
       ],
@@ -916,6 +895,68 @@ class _AudioToggleTile extends StatelessWidget {
             value: enabled,
             onChanged: onChanged,
             activeColor: AppColors.primary,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A read-only info tile used inside the edit-profile bottom sheet.
+class _ReadOnlyInfoField extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String value;
+
+  const _ReadOnlyInfoField({
+    required this.icon,
+    required this.label,
+    required this.value,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: AppColors.background,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.border.withOpacity(0.3)),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, color: AppColors.textSecondary, size: 20),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: const TextStyle(color: AppColors.textSecondary, fontSize: 11),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  value,
+                  style: const TextStyle(
+                    color: AppColors.textPrimary,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+            decoration: BoxDecoration(
+              color: AppColors.textSecondary.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: const Text(
+              'Read-only',
+              style: TextStyle(color: AppColors.textSecondary, fontSize: 10),
+            ),
           ),
         ],
       ),

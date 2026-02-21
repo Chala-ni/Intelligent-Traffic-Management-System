@@ -28,6 +28,7 @@ class DriverProfile(BaseModel):
     phone: str
     name: Optional[str]
     plate_number: str
+    license_number: Optional[str] = None
     current_score: int
     risk_level: str
     total_violations: int
@@ -182,6 +183,7 @@ async def get_driver_profile(user: UserInfo = Depends(get_current_driver)):
         phone=driver_user.get("phone", ""),
         name=driver_user.get("name"),
         plate_number=plate_number,
+        license_number=driver_user.get("license_number"),
         current_score=current_score,
         risk_level=get_risk_level(current_score),
         total_violations=total_violations,

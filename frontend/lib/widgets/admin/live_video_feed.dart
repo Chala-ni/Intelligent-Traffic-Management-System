@@ -10,10 +10,12 @@ import '../../core/config/app_config.dart';
 
 class LiveVideoFeed extends StatefulWidget {
   final VoidCallback? onZoneEditorPressed;
+  final VoidCallback? onSettingsPressed;
 
   const LiveVideoFeed({
     super.key,
     this.onZoneEditorPressed,
+    this.onSettingsPressed,
   });
 
   @override
@@ -25,6 +27,9 @@ class _LiveVideoFeedState extends State<LiveVideoFeed> {
   StreamSubscription? _streamSubscription;
   Uint8List? _currentFrame;
   bool _isStreaming = false;
+
+  /// Shared notifier so fullscreen overlay gets frames without a second WebSocket.
+  final ValueNotifier<Uint8List?> _frameNotifier = ValueNotifier<Uint8List?>(null);
   bool _isConnecting = false;
   bool _hasError = false;
   String _errorMessage = '';
@@ -132,6 +137,7 @@ class _LiveVideoFeedState extends State<LiveVideoFeed> {
           // Decode Base64 to bytes
           try {
             final bytes = base64Decode(data as String);
+            _frameNotifier.value = bytes;
             setState(() {
               _currentFrame = bytes;
               _isStreaming = true;
@@ -252,6 +258,7 @@ class _LiveVideoFeedState extends State<LiveVideoFeed> {
   @override
   void dispose() {
     debugPrint('[VideoFeed] dispose() called');
+    _frameNotifier.dispose();
     _clockTimer?.cancel();
     _reconnectTimer?.cancel();
     _statsTimer?.cancel();
@@ -541,7 +548,7 @@ class _LiveVideoFeedState extends State<LiveVideoFeed> {
                 _buildControlButton(
                   icon: Icons.fullscreen,
                   label: 'Fullscreen',
-                  onTap: () {},
+                  onTap: _openFullscreen,
                 ),
                 _buildControlButton(
                   icon: Icons.edit_location_alt,
@@ -552,7 +559,7 @@ class _LiveVideoFeedState extends State<LiveVideoFeed> {
                 _buildControlButton(
                   icon: Icons.settings,
                   label: 'Settings',
-                  onTap: () {},
+                  onTap: widget.onSettingsPressed,
                 ),
               ],
             );
@@ -571,7 +578,7 @@ class _LiveVideoFeedState extends State<LiveVideoFeed> {
                 child: _buildControlButton(
                   icon: Icons.fullscreen,
                   label: 'Fullscreen',
-                  onTap: () {},
+                  onTap: _openFullscreen,
                 ),
               ),
               const SizedBox(width: 8),
@@ -588,7 +595,7 @@ class _LiveVideoFeedState extends State<LiveVideoFeed> {
                 child: _buildControlButton(
                   icon: Icons.settings,
                   label: 'Settings',
-                  onTap: () {},
+                  onTap: widget.onSettingsPressed,
                 ),
               ),
             ],
@@ -629,6 +636,99 @@ class _LiveVideoFeedState extends State<LiveVideoFeed> {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  /// Open the video feed full-screen inside the same browser tab (no new window).
+  void _openFullscreen() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        fullscreenDialog: true,
+        builder: (_) => _FullscreenVideoOverlay(frameNotifier: _frameNotifier),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Full-screen video overlay — listens to the shared ValueNotifier from the
+// parent LiveVideoFeed so it receives frames instantly without opening a
+// second WebSocket (the backend only serves one client at a time).
+// ---------------------------------------------------------------------------
+class _FullscreenVideoOverlay extends StatelessWidget {
+  final ValueNotifier<Uint8List?> frameNotifier;
+  const _FullscreenVideoOverlay({required this.frameNotifier});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: SafeArea(
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            // Video — fill entire area edge-to-edge
+            Positioned.fill(
+              child: ValueListenableBuilder<Uint8List?>(
+                valueListenable: frameNotifier,
+                builder: (_, frame, __) {
+                  if (frame != null) {
+                    return Image.memory(
+                      frame,
+                      gaplessPlayback: true,
+                      fit: BoxFit.cover,
+                      width: double.infinity,
+                      height: double.infinity,
+                    );
+                  }
+                  return const Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        CircularProgressIndicator(color: Colors.white54),
+                        SizedBox(height: 16),
+                        Text('Waiting for video...',
+                            style: TextStyle(color: Colors.white54)),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+            // Exit fullscreen button — floating pill
+            Positioned(
+              top: 20,
+              right: 20,
+              child: Material(
+                color: Colors.black.withOpacity(0.6),
+                borderRadius: BorderRadius.circular(24),
+                elevation: 4,
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(24),
+                  onTap: () => Navigator.of(context).pop(),
+                  child: const Padding(
+                    padding:
+                        EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.fullscreen_exit,
+                            color: Colors.white, size: 20),
+                        SizedBox(width: 8),
+                        Text('Exit Fullscreen',
+                            style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 13,
+                                fontWeight: FontWeight.w500)),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );

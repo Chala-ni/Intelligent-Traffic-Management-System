@@ -738,7 +738,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        hotspot.location,
+                        _formatHotspotLocation(hotspot.location),
                         style: AppTypography.labelMedium.copyWith(
                           fontWeight: FontWeight.bold,
                         ),
@@ -770,7 +770,7 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
                       crossAxisAlignment: CrossAxisAlignment.end,
                       children: [
                         Text(
-                          '\$${hotspot.totalFines.toStringAsFixed(0)}',
+                          'LKR ${hotspot.totalFines.toStringAsFixed(0)}',
                           style: AppTypography.h4.copyWith(color: AppColors.error),
                         ),
                         Text(
@@ -811,6 +811,21 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
         ],
       ),
     );
+  }
+
+  String _formatHotspotLocation(String location) {
+    // Legacy: old records stored zone:zone_id format
+    if (location.startsWith('zone:')) {
+      final zoneId = location.substring(5).trim();
+      // Try to make it readable: zone_1 -> Zone 1
+      return 'Zone ${zoneId.replaceAll(RegExp(r'[^0-9]'), '').isEmpty ? zoneId : zoneId.replaceAll('_', ' ').split(' ').map((w) => w.isNotEmpty ? '${w[0].toUpperCase()}${w.substring(1)}' : '').join(' ')}';
+    }
+    if (location.isEmpty || location.toLowerCase() == 'unknown') {
+      return 'Unknown Location';
+    }
+    // All other values (including admin zone names like "No Parking Zone 1"
+    // and "Traffic Camera") are stored as-is — just return them directly.
+    return location;
   }
 
   String _formatTypeName(String type) {

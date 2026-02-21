@@ -17,6 +17,7 @@ class User {
   final String phone;
   final String? name;
   final String? plateNumber;
+  final String? licenseNumber;
   final UserType userType;
 
   User({
@@ -24,6 +25,7 @@ class User {
     required this.phone,
     this.name,
     this.plateNumber,
+    this.licenseNumber,
     required this.userType,
   });
 
@@ -33,6 +35,7 @@ class User {
       phone: json['phone'] ?? json['username'] ?? '',
       name: json['name'],
       plateNumber: json['plate_number'],
+      licenseNumber: json['license_number'],
       userType: type,
     );
   }
@@ -43,6 +46,7 @@ class User {
       'phone': phone,
       'name': name,
       'plate_number': plateNumber,
+      'license_number': licenseNumber,
       'user_type': userType.name,
     };
   }
@@ -381,6 +385,7 @@ class AuthProvider with ChangeNotifier {
           phone: response.data!['phone'] ?? _user?.phone ?? '',
           name: response.data!['name'] ?? _user?.name,
           plateNumber: response.data!['plate_number'] ?? _user?.plateNumber,
+          licenseNumber: response.data!['license_number'] ?? _user?.licenseNumber,
           userType: UserType.driver,
         );
         await _apiClient.setUserData(_user!.toJson());

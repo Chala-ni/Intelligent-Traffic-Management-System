@@ -168,6 +168,9 @@ async def lifespan(app: FastAPI):
 
     preload_thread = threading.Thread(target=_preload_models, daemon=True)
     preload_thread.start()
+    # Block until models are ready so the first video connection
+    # immediately gets annotated frames (zones, boxes, etc.).
+    preload_thread.join()
 
     yield
     # Shutdown

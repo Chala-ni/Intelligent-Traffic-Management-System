@@ -443,6 +443,9 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
               onZoneEditorPressed: () {
                 Navigator.of(context).pushReplacementNamed('/admin/zones');
               },
+              onSettingsPressed: () {
+                Navigator.of(context).pushReplacementNamed('/admin/settings');
+              },
             ),
           ),
           const SizedBox(width: 24),
@@ -497,8 +500,8 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
           const SizedBox(height: 12),
           _buildActionButton(
             icon: Icons.analytics,
-            label: 'Reports',
-            onTap: () {},
+            label: 'Analytics',
+            onTap: () => Navigator.of(context).pushReplacementNamed('/admin/analytics'),
           ),
         ],
       ),
