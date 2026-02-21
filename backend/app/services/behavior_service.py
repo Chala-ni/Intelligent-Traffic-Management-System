@@ -11,12 +11,16 @@ Detects:
 All behaviors contribute to the risk score calculation.
 """
 
+import asyncio
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional
 from collections import deque
 from datetime import datetime
 from enum import Enum
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -177,6 +181,34 @@ def _queue_event_for_db_save(event: BehaviorEvent):
     thread.start()
 
 
+def _send_behavior_warning(event: BehaviorEvent):
+    """Fire-and-forget: send a warning push notification for a behavior event.
+    Uses vehicle tracking ID as fallback when plate is not available,
+    mirroring how violations always create entries for unknown drivers."""
+    # Use plate if available, otherwise fall back to UNKNOWN{id}
+    # (same format the detection pipeline uses in yolo_detector.py)
+    identifier = event.plate_number or f"UNKNOWN{event.vehicle_id}"
+    try:
+        import threading
+        from app.services.push_notification_service import send_warning_notification
+        details_str = ", ".join(f"{k}: {v}" for k, v in (event.details or {}).items())
+
+        def _do_send():
+            try:
+                send_warning_notification(
+                    plate_number=identifier,
+                    behavior_type=event.behavior_type.value,
+                    severity=event.severity.value,
+                    details=details_str,
+                )
+            except Exception as e:
+                logger.error("Behavior warning push error: %s", e)
+
+        threading.Thread(target=_do_send, daemon=True).start()
+    except Exception as e:
+        logger.error("Failed to queue behavior warning: %s", e)
+
+
 # ============================================================================
 # DETECTION FUNCTIONS
 # ============================================================================
@@ -247,6 +279,7 @@ def detect_sudden_stop(
         
         _behavior_events.append(event)
         _queue_event_for_db_save(event)  # Save to database
+        _send_behavior_warning(event)
         print(f"[BEHAVIOR] 🛑 Vehicle {track_id} SUDDEN STOP: {avg_old_speed:.0f} → {avg_new_speed:.0f} px/s")
         
         return event
@@ -308,6 +341,7 @@ def detect_harsh_brake(
         
         _behavior_events.append(event)
         _queue_event_for_db_save(event)  # Save to database
+        _send_behavior_warning(event)
         print(f"[BEHAVIOR] 🚨 Vehicle {track_id} HARSH BRAKE: decel={deceleration:.0f} px/frame")
         
         return event
@@ -382,6 +416,7 @@ def detect_lane_drift(
             
             _behavior_events.append(event)
             _queue_event_for_db_save(event)  # Save to database
+            _send_behavior_warning(event)
             print(f"[BEHAVIOR] ↔️ Vehicle {track_id} LANE DRIFT: variance={x_variance:.1f}")
             
             return event
@@ -560,8 +595,13 @@ def _save_behavior_event_sync(event: BehaviorEvent):
     try:
         from app.db.firestore_client import get_sync_db, Collections
         from app.utils.plate_utils import normalize_plate
+        from datetime import timedelta as _td
+        from google.cloud.firestore_v1 import FieldFilter
 
+        # Use plate if available, otherwise fall back to UNKNOWN{id}
+        # (same format the detection pipeline uses in yolo_detector.py)
         plate_norm = normalize_plate(event.plate_number) if event.plate_number else None
+        identifier = plate_norm or f"UNKNOWN{event.vehicle_id}"
 
         db = get_sync_db()
         db.collection(Collections.ABNORMAL_BEHAVIOR).add({
@@ -569,18 +609,88 @@ def _save_behavior_event_sync(event: BehaviorEvent):
             "behavior_type": event.behavior_type.value,
             "severity": event.severity.value,
             "plate_number": event.plate_number,
-            "plate_number_normalized": plate_norm,
+            "plate_number_normalized": identifier,
             "details": event.details,
             "timestamp": datetime.now().isoformat(),
         })
         print(f"[DB] Saved behavior event: {event.behavior_type.value} for vehicle {event.vehicle_id}")
-        
-        # If we have a plate number, also record this as a lightweight violation
-        # so it appears in the driver's record and risk score
-        if plate_norm:
-            _record_behavior_as_driver_event(db, plate_norm, event)
+
+        # Always record as a driver event + ensure driver entity exists
+        # (just like violations do for unknown plates)
+        _record_behavior_as_driver_event(db, identifier, event)
+        _ensure_driver_entity(db, identifier)
+
+        # Create a driver notification so the warning always appears
+        # in the notification list even if the FCM push thread fails.
+        behavior_labels = {
+            "sudden_stop": "Sudden Stop Detected",
+            "harsh_brake": "Harsh Braking Detected",
+            "lane_drift": "Lane Drifting Detected",
+            "wrong_way": "Wrong-Way Driving Detected",
+            "erratic_movement": "Erratic Movement Detected",
+        }
+        btype = event.behavior_type.value
+        title = behavior_labels.get(btype, f"Warning: {btype.replace('_', ' ').title()}")
+        body = f"Severity: {event.severity.value.upper()}"
+        details_str = ", ".join(f"{k}: {v}" for k, v in (event.details or {}).items())
+        if details_str:
+            body += f" — {details_str}"
+
+        # Quick dedup: skip if an identical notification was written
+        # in the last 30 seconds (the FCM push thread may have created one)
+        cutoff = (datetime.now() - _td(seconds=30)).isoformat()
+        existing = list(
+            db.collection(Collections.DRIVER_NOTIFICATIONS)
+            .where(filter=FieldFilter("plate_number", "==", identifier))
+            .limit(5)
+            .stream()
+        )
+        already_exists = any(
+            d.to_dict().get("title") == title
+            and d.to_dict().get("timestamp", "") >= cutoff
+            for d in existing
+        )
+        if not already_exists:
+            db.collection(Collections.DRIVER_NOTIFICATIONS).add({
+                "plate_number": identifier,
+                "title": title,
+                "message": body,
+                "notification_type": "warning",
+                "timestamp": datetime.now().isoformat(),
+                "read": False,
+            })
+            print(f"[BEHAVIOR→NOTIF] Created notification for {identifier}: {title}")
     except Exception as e:
         print(f"[DB] Error saving behavior event: {e}")
+
+
+def _ensure_driver_entity(db, plate_normalized: str):
+    """
+    Ensure a driver entity exists in the DRIVERS collection when a warning
+    is issued, just like violations create/update driver records.
+    Uses merge=True so it never overwrites existing violation-based data.
+    """
+    try:
+        from app.db.firestore_client import Collections
+
+        doc_ref = db.collection(Collections.DRIVERS).document(plate_normalized)
+        doc = doc_ref.get()
+        if doc.exists:
+            # Driver already exists — just update the timestamp
+            doc_ref.update({"updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+        else:
+            # Create a new driver entity with default score
+            doc_ref.set({
+                "driver_id": plate_normalized,
+                "current_score": 100,
+                "total_violations": 0,
+                "total_fines": 0,
+                "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            })
+            print(f"[BEHAVIOR→DRIVER] Created driver entity for {plate_normalized}")
+    except Exception as e:
+        print(f"[BEHAVIOR→DRIVER] Error ensuring driver entity: {e}")
 
 
 def _record_behavior_as_driver_event(db, plate_normalized: str, event: BehaviorEvent):

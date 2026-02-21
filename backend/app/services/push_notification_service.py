@@ -5,7 +5,7 @@ Sends FCM push notifications to drivers via Firebase Admin SDK.
 Usage:
     from app.services.push_notification_service import send_push_to_driver
 
-    await send_push_to_driver(
+    send_push_to_driver(
         plate_number="ABC-1234",
         title="New Violation",
         body="Speed violation detected at Main St.",
@@ -47,6 +47,13 @@ def _init_firebase():
         import firebase_admin
         from firebase_admin import credentials
 
+        # Check if Firebase was already initialized by another module
+        # (e.g. firestore_client.py initializes it at startup)
+        if firebase_admin._apps:
+            _firebase_app = firebase_admin.get_app()
+            logger.info("Firebase Admin SDK already initialized – reusing existing app.")
+            return True
+
         if not os.path.exists(SERVICE_ACCOUNT_PATH):
             logger.warning(
                 "Firebase service account not found at %s. "
@@ -64,29 +71,35 @@ def _init_firebase():
         return False
 
 
-async def _get_fcm_token(plate_number: str) -> Optional[str]:
-    """Look up the FCM token for a driver by plate number from Firestore."""
+def _get_fcm_token(plate_number: str) -> Optional[str]:
+    """Look up the FCM token for a driver by plate number from Firestore (sync)."""
     try:
-        from app.db.firestore_client import get_db, Collections
+        from app.db.firestore_client import get_sync_db, Collections
+        from app.utils.plate_utils import normalize_plate
 
-        db = get_db()
-        doc = await db.collection(Collections.DRIVER_FCM_TOKENS).document(plate_number).get()
-        if doc.exists:
-            return doc.to_dict().get("fcm_token")
+        norm_plate = normalize_plate(plate_number)
+        db = get_sync_db()
+        # Try normalized plate first, then original
+        for plate_val in dict.fromkeys([norm_plate, plate_number]):
+            if not plate_val:
+                continue
+            doc = db.collection(Collections.DRIVER_FCM_TOKENS).document(plate_val).get()
+            if doc.exists:
+                return doc.to_dict().get("fcm_token")
         return None
     except Exception as e:
         logger.error("Error fetching FCM token for %s: %s", plate_number, e)
         return None
 
 
-async def send_push_to_driver(
+def send_push_to_driver(
     plate_number: str,
     title: str,
     body: str,
     data: Optional[dict] = None,
 ) -> bool:
     """
-    Send a push notification to a specific driver.
+    Send a push notification to a specific driver (synchronous).
 
     Args:
         plate_number: Driver's license plate (used to look up FCM token).
@@ -101,7 +114,7 @@ async def send_push_to_driver(
         logger.warning("Firebase not configured – skipping push to %s", plate_number)
         return False
 
-    token = await _get_fcm_token(plate_number)
+    token = _get_fcm_token(plate_number)
     if not token:
         logger.info("No FCM token registered for plate %s", plate_number)
         return False
@@ -139,14 +152,14 @@ async def send_push_to_driver(
         return False
 
 
-async def send_violation_notification(
+def send_violation_notification(
     plate_number: str,
     violation_type: str,
     fine_amount: float,
     violation_id: str = "",
 ) -> bool:
-    """Send a push notification for a new violation."""
-    return await send_push_to_driver(
+    """Send a push notification for a new violation (synchronous)."""
+    return send_push_to_driver(
         plate_number=plate_number,
         title="Traffic Violation Detected",
         body=f"{violation_type} — Fine: LKR {fine_amount:,.0f}",
@@ -159,14 +172,14 @@ async def send_violation_notification(
     )
 
 
-async def send_fine_notification(
+def send_fine_notification(
     plate_number: str,
     fine_id: int,
     amount: float,
     due_date: str = "",
 ) -> bool:
-    """Send a push notification for a new or updated fine."""
-    return await send_push_to_driver(
+    """Send a push notification for a new or updated fine (synchronous)."""
+    return send_push_to_driver(
         plate_number=plate_number,
         title="Fine Issued",
         body=f"Amount: LKR {amount:,.0f}" + (f" — Due: {due_date}" if due_date else ""),
@@ -179,13 +192,13 @@ async def send_fine_notification(
     )
 
 
-async def send_score_alert(
+def send_score_alert(
     plate_number: str,
     new_score: int,
     risk_level: str,
 ) -> bool:
-    """Send a push notification when driver score drops significantly."""
-    return await send_push_to_driver(
+    """Send a push notification when driver score drops significantly (synchronous)."""
+    return send_push_to_driver(
         plate_number=plate_number,
         title="Safety Score Updated",
         body=f"Your score is now {new_score} ({risk_level})",
@@ -193,5 +206,75 @@ async def send_score_alert(
             "type": "score_update",
             "score": str(new_score),
             "risk_level": risk_level,
+        },
+    )
+
+
+def send_warning_notification(
+    plate_number: str,
+    behavior_type: str,
+    severity: str,
+    details: str = "",
+) -> bool:
+    """
+    Send a warning push notification for abnormal driving behavior (synchronous).
+    Also stores the warning in DRIVER_NOTIFICATIONS collection.
+    """
+    behavior_labels = {
+        "sudden_stop": "Sudden Stop Detected",
+        "harsh_brake": "Harsh Braking Detected",
+        "lane_drift": "Lane Drifting Detected",
+        "parking_warning": "Parking Warning",
+    }
+    title = behavior_labels.get(behavior_type, f"Warning: {behavior_type.replace('_', ' ').title()}")
+    body = f"Severity: {severity.upper()}"
+    if details:
+        body += f" — {details}"
+
+    # Store in Firestore so it appears in the notification list
+    # (skip if a duplicate was already created by the behaviour save thread)
+    try:
+        from app.db.firestore_client import get_sync_db, Collections
+        from app.utils.plate_utils import normalize_plate
+        from datetime import datetime, timedelta
+        from google.cloud.firestore_v1 import FieldFilter
+
+        norm_plate = normalize_plate(plate_number)
+        db = get_sync_db()
+
+        # Quick dedup: avoid double-insert within a 30-second window
+        cutoff = (datetime.now() - timedelta(seconds=30)).isoformat()
+        recent = list(
+            db.collection(Collections.DRIVER_NOTIFICATIONS)
+            .where(filter=FieldFilter("plate_number", "==", norm_plate))
+            .limit(5)
+            .stream()
+        )
+        already = any(
+            d.to_dict().get("title") == title
+            and d.to_dict().get("timestamp", "") >= cutoff
+            for d in recent
+        )
+        if not already:
+            db.collection(Collections.DRIVER_NOTIFICATIONS).add({
+                "plate_number": norm_plate,
+                "title": title,
+                "message": body,
+                "notification_type": "warning",
+                "timestamp": datetime.now().isoformat(),
+                "read": False,
+            })
+    except Exception as e:
+        logger.error("Failed to store warning notification: %s", e)
+
+    return send_push_to_driver(
+        plate_number=plate_number,
+        title=title,
+        body=body,
+        data={
+            "type": "warning",
+            "behavior_type": behavior_type,
+            "severity": severity,
+            "details": details,
         },
     )

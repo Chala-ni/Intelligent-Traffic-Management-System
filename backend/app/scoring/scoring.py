@@ -27,7 +27,6 @@ class ViolationType(str, Enum):
     RED_LIGHT = "red_light"
     WRONG_WAY = "wrong_way"
     LANE_WEAVING = "lane_weaving"
-    RECKLESS_DRIVING = "reckless_driving"
 
 
 # Violation severity and penalty points (aligned with LiveSafeScore spec)
@@ -42,7 +41,6 @@ VIOLATION_PENALTIES = {
     ViolationType.RED_LIGHT: {"points": 25, "fine": 10000.0, "severity": "high"},
     ViolationType.WRONG_WAY: {"points": 20, "fine": 15000.0, "severity": "critical"},
     ViolationType.LANE_WEAVING: {"points": 5, "fine": 3000.0, "severity": "low"},
-    ViolationType.RECKLESS_DRIVING: {"points": 25, "fine": 25000.0, "severity": "critical"},
 }
 
 
@@ -307,17 +305,21 @@ class ScoringEngine:
         try:
             db = get_sync_db()
 
+            # Normalize the driver_id to avoid duplicates (UNKNOWN-9 vs UNKNOWN_9 vs UNKNOWN9)
+            from app.utils.plate_utils import normalize_plate
+            norm_driver_id = normalize_plate(driver.driver_id) or driver.driver_id
+
             # Insert violation record
             penalty = VIOLATION_PENALTIES.get(violation.violation_type, {"severity": "medium"})
             violation_doc = {
-                "driver_id": violation.driver_id,
+                "driver_id": norm_driver_id,
                 "violation_type": violation.violation_type.value,
                 "severity": penalty.get("severity", "medium"),
                 "fine_amount": violation.fine_amount,
                 "points_deducted": penalty.get("points", 0),
                 "timestamp": datetime.fromtimestamp(violation.timestamp).strftime("%Y-%m-%d %H:%M:%S"),
                 "location": violation.location or "Unknown",
-                "license_plate": violation.license_plate or violation.driver_id,
+                "license_plate": norm_driver_id,
                 "evidence_path": violation.snapshot_path,
                 "notes": violation.notes,
                 "status": "pending",
@@ -327,10 +329,52 @@ class ScoringEngine:
                 violation_doc["fine_breakdown"] = violation.fine_breakdown
             db.collection(Collections.VIOLATIONS).add(violation_doc)
 
-            # Calculate actual totals from Firestore
+            # Store a real notification document for the driver
+            # Use already-normalized plate for notifications
+            plate = norm_driver_id
+            vtype_display = violation.violation_type.value.replace('_', ' ').title()
+            notif_doc = {
+                "plate_number": plate,
+                "title": f"{vtype_display} Recorded",
+                "message": f"A {vtype_display} violation was recorded. Fine: LKR {violation.fine_amount:,.0f}",
+                "notification_type": "violation",
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "read": False,
+            }
+            db.collection(Collections.DRIVER_NOTIFICATIONS).add(notif_doc)
+
+            # Send FCM push notification (fire-and-forget via thread)
+            import threading
+            def _send_push():
+                try:
+                    from app.services.push_notification_service import send_violation_notification
+                    send_violation_notification(
+                        plate_number=plate,
+                        violation_type=vtype_display,
+                        fine_amount=violation.fine_amount,
+                        violation_id=violation.violation_id,
+                    )
+                except Exception as push_err:
+                    print(f"[SCORING] Push notification error: {push_err}")
+            threading.Thread(target=_send_push, daemon=True).start()
+
+            # Auto-create a community alert for this violation type
+            def _create_community_alert():
+                try:
+                    from app.routers.community import create_community_alert_sync
+                    create_community_alert_sync(
+                        violation_type=violation.violation_type.value,
+                        junction_id="main",
+                        extra_info=f"(Fine: LKR {violation.fine_amount:,.0f})",
+                    )
+                except Exception as alert_err:
+                    print(f"[SCORING] Community alert error: {alert_err}")
+            threading.Thread(target=_create_community_alert, daemon=True).start()
+
+            # Calculate actual totals from Firestore (use normalized ID)
             vio_docs = list(
                 db.collection(Collections.VIOLATIONS)
-                .where("driver_id", "==", driver.driver_id)
+                .where("driver_id", "==", norm_driver_id)
                 .stream()
             )
             actual_violations = len(vio_docs)
@@ -340,9 +384,9 @@ class ScoringEngine:
             total_points_deducted = sum(d.to_dict().get("points_deducted", 0) for d in vio_docs)
             calculated_score = max(0, 100 - total_points_deducted)
 
-            # Upsert driver document (use driver_id as doc ID)
-            db.collection(Collections.DRIVERS).document(driver.driver_id).set({
-                "driver_id": driver.driver_id,
+            # Upsert driver document (use normalized ID as doc ID to prevent duplicates)
+            db.collection(Collections.DRIVERS).document(norm_driver_id).set({
+                "driver_id": norm_driver_id,
                 "current_score": calculated_score,
                 "total_violations": actual_violations,
                 "total_fines": actual_fines,
@@ -456,7 +500,6 @@ def update_penalties_from_settings(settings_dict: dict) -> None:
         'red_light': ViolationType.RED_LIGHT,
         'wrong_way': ViolationType.WRONG_WAY,
         'lane_weaving': ViolationType.LANE_WEAVING,
-        'reckless_driving': ViolationType.RECKLESS_DRIVING,
     }
 
     for key, vtype in mapping.items():
@@ -514,7 +557,7 @@ if __name__ == "__main__":
     print(f"Driver {driver2.driver_id}: Score={driver2.current_score}, Risk={driver2.risk_level}")
     
     # Driver 3: Critical violations
-    driver3, _ = engine.record_violation("BAD-0000", ViolationType.RECKLESS_DRIVING)
+    driver3, _ = engine.record_violation("BAD-0000", ViolationType.WRONG_WAY)
     driver3, _ = engine.record_violation("BAD-0000", ViolationType.WRONG_WAY)
     print(f"Driver {driver3.driver_id}: Score={driver3.current_score}, Risk={driver3.risk_level}")
     

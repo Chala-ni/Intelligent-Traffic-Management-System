@@ -771,12 +771,23 @@ async def get_violation_trends(
         filter=FieldFilter("timestamp", ">=", start_date)
     ).order_by("timestamp")
 
+    # Normalise raw violation_type → display category for the pie chart
+    def _normalise_vtype(raw: str) -> str:
+        raw_l = raw.lower()
+        if raw_l.startswith("parking"):
+            return "parking_no_parking"   # group all parking sub-types
+        if raw_l in ("lane_violation", "lane_weaving", "lane_drift"):
+            return "lane_weaving"
+        if raw_l == "reckless_driving":
+            return "speeding"              # fold legacy reckless into speeding
+        return raw_l
+
     trends = {}
     async for doc in q.stream():
         v = doc.to_dict()
         ts = v.get("timestamp", "")
         date = ts[:10] if len(ts) >= 10 else ts  # Extract YYYY-MM-DD
-        vtype = v.get("violation_type", "unknown")
+        vtype = _normalise_vtype(v.get("violation_type", "unknown"))
         if date not in trends:
             trends[date] = {"date": date, "total": 0, "by_type": {}}
         trends[date]["by_type"][vtype] = trends[date]["by_type"].get(vtype, 0) + 1

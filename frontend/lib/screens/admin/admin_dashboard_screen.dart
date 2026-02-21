@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../core/theme/app_colors.dart';
@@ -23,6 +24,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
   DashboardStats? _dashboardStats;
   Map<String, dynamic>? _junctionScore;
   bool _isLoading = true;
+  Timer? _pollTimer;
   
   final ApiClient _apiClient = ApiClient();
 
@@ -30,6 +32,16 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
   void initState() {
     super.initState();
     _loadStats();
+    // Auto-refresh stats every 10 seconds
+    _pollTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      _loadStats(silent: true);
+    });
+  }
+
+  @override
+  void dispose() {
+    _pollTimer?.cancel();
+    super.dispose();
   }
 
   /// Handle unauthorized access - redirect to login
@@ -38,9 +50,11 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     Navigator.of(context).pushNamedAndRemoveUntil('/platform-router', (route) => false);
   }
 
-  Future<void> _loadStats() async {
+  Future<void> _loadStats({bool silent = false}) async {
     if (!mounted) return;
-    setState(() => _isLoading = true);
+    if (!silent) {
+      setState(() => _isLoading = true);
+    }
     
     try {
       final results = await Future.wait([
@@ -60,7 +74,9 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
       _handleUnauthorized();
     } catch (e) {
       if (!mounted) return;
-      setState(() => _isLoading = false);
+      if (!silent) {
+        setState(() => _isLoading = false);
+      }
     }
   }
 

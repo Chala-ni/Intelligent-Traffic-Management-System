@@ -287,7 +287,7 @@ async def get_my_violations(
                 "location": v.get("location"),
                 "fine_amount": v.get("fine_amount", 0),
                 "points_deducted": v.get("points_deducted", 0),
-                "evidence_path": v.get("snapshot_path"),
+                "evidence_path": v.get("evidence_path") or v.get("snapshot_path"),
                 "notes": v.get("notes"),
                 "status": "recorded",
             }
@@ -464,18 +464,28 @@ async def get_notifications(
     plate_number = await get_plate_from_token(user)
     db = get_db()
 
+    # Normalize plate to match how notifications are stored
+    from app.utils.plate_utils import normalize_plate
+    plate_norm = normalize_plate(plate_number) if plate_number else ""
+
     notifications = []
 
     # Query from driver_notifications collection (sort in Python to avoid composite index)
-    q = db.collection(Collections.DRIVER_NOTIFICATIONS).where(
-        filter=FieldFilter("plate_number", "==", plate_number)
-    )
-    if unread_only:
-        q = q.where(filter=FieldFilter("read", "==", False))
-
+    # Search both normalized and raw plate to catch all notifications
+    seen_ids = set()
     notif_docs = []
-    async for doc in q.stream():
-        notif_docs.append((doc.id, doc.to_dict()))
+    for pv in dict.fromkeys([plate_norm, plate_number]):
+        if not pv:
+            continue
+        q = db.collection(Collections.DRIVER_NOTIFICATIONS).where(
+            filter=FieldFilter("plate_number", "==", pv)
+        )
+        if unread_only:
+            q = q.where(filter=FieldFilter("read", "==", False))
+        async for doc in q.stream():
+            if doc.id not in seen_ids:
+                seen_ids.add(doc.id)
+                notif_docs.append((doc.id, doc.to_dict()))
     # Sort by timestamp descending and limit
     notif_docs.sort(key=lambda x: x[1].get("timestamp", ""), reverse=True)
     notif_docs = notif_docs[:limit]
@@ -489,30 +499,6 @@ async def get_notifications(
             "timestamp": n.get("timestamp", ""),
             "read": bool(n.get("read", False)),
         })
-
-    # Generate notifications from recent violations (sort in Python)
-    violation_notifs = []
-    for field_name in ("driver_id", "license_plate"):
-        vq = db.collection(Collections.VIOLATIONS).where(
-            filter=FieldFilter(field_name, "==", plate_number)
-        )
-        async for doc in vq.stream():
-            v = doc.to_dict()
-            violation_notifs.append({
-                "notification_id": hash(f"{v.get('timestamp','')}{v.get('violation_type','')}") % 100000,
-                "title": f"{v.get('violation_type','').replace('_', ' ').title()} Recorded",
-                "message": f"A {v.get('violation_type','')} violation was recorded. Fine: LKR {v.get('fine_amount',0):.2f}",
-                "notification_type": "violation",
-                "timestamp": v.get("timestamp", ""),
-                "read": False,
-            })
-
-    # Deduplicate and sort violation_notifs by timestamp desc
-    seen_ids = set()
-    for vn in violation_notifs:
-        if vn["notification_id"] not in seen_ids:
-            seen_ids.add(vn["notification_id"])
-            notifications.append(vn)
 
     # Sort by timestamp desc and limit
     notifications.sort(key=lambda x: x["timestamp"], reverse=True)
@@ -547,8 +533,11 @@ async def mark_notification_read(
     # Verify the notification belongs to this user
     notif_data = doc.to_dict()
     plate_number = await get_plate_from_token(user)
-    notif_driver = notif_data.get("driver_id") or notif_data.get("plate_number")
-    if notif_driver != plate_number:
+    from app.utils.plate_utils import normalize_plate
+    plate_norm = normalize_plate(plate_number) if plate_number else ""
+    notif_driver = notif_data.get("driver_id") or notif_data.get("plate_number") or ""
+    notif_driver_norm = normalize_plate(notif_driver) if notif_driver else ""
+    if notif_driver_norm != plate_norm and notif_driver != plate_number:
         raise HTTPException(status_code=403, detail="Not authorized to access this notification")
     
     await doc_ref.update({"read": True})
@@ -630,14 +619,24 @@ async def register_fcm_token(
     if not plate_number:
         raise HTTPException(status_code=404, detail="Driver not found")
 
+    from app.utils.plate_utils import normalize_plate
+    plate_norm = normalize_plate(plate_number) or plate_number
+
     db = get_db()
-    # Use plate_number as document ID for uniqueness (upsert)
-    await db.collection(Collections.DRIVER_FCM_TOKENS).document(plate_number).set({
+    # Use NORMALIZED plate as document ID so token lookups from
+    # scoring engine and behaviour service (which normalize first) always match.
+    # Also store under the raw plate for backward compatibility.
+    token_doc = {
         "plate_number": plate_number,
+        "plate_number_normalized": plate_norm,
         "fcm_token": body.fcm_token,
         "platform": body.platform,
         "updated_at": datetime.now().isoformat(),
-    })
+    }
+    await db.collection(Collections.DRIVER_FCM_TOKENS).document(plate_norm).set(token_doc)
+    # If raw plate differs, also write under the raw key so legacy lookups work
+    if plate_norm != plate_number:
+        await db.collection(Collections.DRIVER_FCM_TOKENS).document(plate_number).set(token_doc)
 
     return {"status": "ok", "message": "FCM token registered"}
 
@@ -649,7 +648,13 @@ async def remove_fcm_token(
     """Remove driver's FCM token (e.g. on logout)."""
     plate_number = await get_plate_from_token(user)
 
+    from app.utils.plate_utils import normalize_plate
+    plate_norm = normalize_plate(plate_number) or plate_number
+
     db = get_db()
-    await db.collection(Collections.DRIVER_FCM_TOKENS).document(plate_number).delete()
+    # Delete both normalized and raw doc IDs
+    await db.collection(Collections.DRIVER_FCM_TOKENS).document(plate_norm).delete()
+    if plate_norm != plate_number:
+        await db.collection(Collections.DRIVER_FCM_TOKENS).document(plate_number).delete()
 
     return {"status": "ok", "message": "FCM token removed"}

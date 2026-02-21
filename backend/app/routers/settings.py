@@ -39,7 +39,6 @@ class FineSettings(BaseModel):
     red_light: ViolationPenaltySettings = ViolationPenaltySettings(points=25, fine=10000.0, severity="high")
     wrong_way: ViolationPenaltySettings = ViolationPenaltySettings(points=20, fine=15000.0, severity="critical")
     lane_weaving: ViolationPenaltySettings = ViolationPenaltySettings(points=10, fine=3500.0, severity="medium")
-    reckless_driving: ViolationPenaltySettings = ViolationPenaltySettings(points=25, fine=25000.0, severity="critical")
 
 
 class JunctionSafetySettings(BaseModel):

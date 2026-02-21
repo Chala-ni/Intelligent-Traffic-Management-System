@@ -17,6 +17,33 @@ Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   debugPrint('[FCM] Background message: ${message.messageId}');
   // Show local notification for background messages
   await NotificationService._showLocalNotification(message);
+
+  // Attempt TTS for background messages so the driver hears the alert
+  try {
+    final tts = FlutterTts();
+    await tts.setLanguage('en-US');
+    await tts.setSpeechRate(0.5);
+    await tts.setVolume(1.0);
+
+    final data = message.data;
+    String? spoken;
+    if (data['type'] == 'violation') {
+      final vtype = data['violation_type'] ?? 'Traffic';
+      final fine = data['fine_amount'] ?? '';
+      spoken = '$vtype violation detected.';
+      if (fine.isNotEmpty && fine != '0') spoken = '$spoken Fine amount: $fine rupees.';
+    } else if (data['type'] == 'warning') {
+      final btype = (data['behavior_type'] ?? 'unknown').replaceAll('_', ' ');
+      spoken = 'Warning. $btype detected.';
+    } else if (message.notification?.body != null) {
+      spoken = message.notification!.body!;
+    }
+    if (spoken != null) {
+      await tts.speak(spoken);
+    }
+  } catch (e) {
+    debugPrint('[FCM] Background TTS error (non-fatal): $e');
+  }
 }
 
 /// Push notification service using Firebase Cloud Messaging (FCM).
@@ -88,6 +115,15 @@ class NotificationService {
     await _localNotifications.initialize(
       const InitializationSettings(android: androidInit, iOS: iosInit),
       onDidReceiveNotificationResponse: _onNotificationResponse,
+    );
+
+    // Tell Firebase to show notification banners even when the app is
+    // in the foreground (iOS).  On Android we handle this ourselves via
+    // flutter_local_notifications inside _handleForegroundMessage.
+    await _messaging.setForegroundNotificationPresentationOptions(
+      alert: true,
+      badge: true,
+      sound: true,
     );
 
     // Handle foreground messages
@@ -184,6 +220,35 @@ class NotificationService {
     return '$spokenType.';
   }
 
+  /// Generate a spoken message for a warning notification
+  String _generateWarningMessage(Map<String, dynamic> data) {
+    final behaviorType = data['behavior_type'] ?? 'unknown';
+    final severity = data['severity'] ?? '';
+    final details = data['details'] ?? '';
+
+    final typeMessages = {
+      'sudden_stop': 'Warning. Sudden stop detected',
+      'harsh_brake': 'Warning. Harsh braking detected',
+      'lane_drift': 'Warning. Lane drifting detected',
+      'wrong_way': 'Alert. Wrong way driving detected',
+      'erratic_movement': 'Warning. Erratic movement detected',
+      'parking_warning': 'Warning. Parking violation warning',
+    };
+
+    final spokenType = typeMessages[behaviorType] ??
+        'Warning. ${behaviorType.replaceAll('_', ' ')} detected';
+
+    final buffer = StringBuffer(spokenType);
+    if (severity.isNotEmpty) {
+      buffer.write('. Severity: $severity');
+    }
+    if (details.isNotEmpty) {
+      buffer.write('. $details');
+    }
+    buffer.write('.');
+    return buffer.toString();
+  }
+
   /// Get the current FCM token
   Future<String?> getToken() async {
     try {
@@ -194,34 +259,40 @@ class NotificationService {
     }
   }
 
-  /// Register FCM token with the backend
+  /// Register FCM token with the backend.
+  /// Always sends to server even if the local cache matches, because
+  /// a previous send may have silently failed (no auth, network error, etc.).
   Future<void> _registerToken() async {
     try {
       final token = await _messaging.getToken();
-      if (token == null) return;
-
-      // Check if token changed
-      final prefs = await SharedPreferences.getInstance();
-      final storedToken = prefs.getString(_fcmTokenKey);
-      if (storedToken == token) return;
-
+      if (token == null) {
+        debugPrint('[FCM] No token available from Firebase');
+        return;
+      }
+      debugPrint('[FCM] Got token: ${token.substring(0, 20)}…');
       await _sendTokenToServer(token);
-      await prefs.setString(_fcmTokenKey, token);
     } catch (e) {
       debugPrint('[FCM] Token registration error: $e');
     }
   }
 
-  /// Send FCM token to backend
+  /// Send FCM token to backend. Only caches locally on success.
   Future<void> _sendTokenToServer(String token) async {
     try {
-      await _apiClient.post(
+      final response = await _apiClient.post(
         ApiEndpoints.registerFcmToken,
         body: {'fcm_token': token, 'platform': defaultTargetPlatform.name},
       );
-      debugPrint('[FCM] Token sent to server');
+      if (response.success) {
+        // Only cache after the server confirms receipt
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString(_fcmTokenKey, token);
+        debugPrint('[FCM] Token sent to server successfully');
+      } else {
+        debugPrint('[FCM] Server rejected token: ${response.error}');
+      }
     } catch (e) {
-      debugPrint('[FCM] Send token error: $e');
+      debugPrint('[FCM] Send token error (will retry next launch): $e');
     }
   }
 
@@ -230,14 +301,21 @@ class NotificationService {
     debugPrint('[FCM] Foreground message: ${message.notification?.title}');
     _showLocalNotification(message);
     
-    // Speak violation notifications using TTS
+    // Speak notifications using TTS based on type
     final data = message.data;
     if (data['type'] == 'violation') {
       final spokenMessage = _generateViolationMessage(data);
       speakNotification(spokenMessage);
+    } else if (data['type'] == 'warning') {
+      final spokenMessage = _generateWarningMessage(data);
+      speakNotification(spokenMessage);
     } else if (data['type'] == 'fine') {
       final amount = data['amount'] ?? '';
       speakNotification('Fine issued. Amount: $amount rupees.');
+    } else if (data['type'] == 'score_update') {
+      final score = data['score'] ?? '';
+      final risk = data['risk_level'] ?? '';
+      speakNotification('Safety score updated. Your score is now $score. Risk level: $risk.');
     } else if (message.notification?.body != null) {
       // For other notification types, speak the body
       speakNotification(message.notification!.body!);
@@ -260,43 +338,116 @@ class NotificationService {
     }
   }
 
-  /// Show a local notification from RemoteMessage
+  /// Show a real phone system notification (appears in the phone's
+  /// notification shade just like WhatsApp, Instagram, etc.).
+  ///
+  /// Works for both foreground and background/terminated states, and
+  /// handles FCM messages with or without a `notification` payload.
   static Future<void> _showLocalNotification(RemoteMessage message) async {
-    final notification = message.notification;
-    final android = message.notification?.android;
-
     final localNotif = FlutterLocalNotificationsPlugin();
 
-    // Initialize (needed for background handler)
+    // Initialize plugin (needed each time for background isolate)
     const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
     await localNotif.initialize(
-      const InitializationSettings(android: androidInit),
+      const InitializationSettings(
+        android: androidInit,
+        iOS: DarwinInitializationSettings(
+          requestAlertPermission: true,
+          requestBadgePermission: true,
+          requestSoundPermission: true,
+        ),
+      ),
     );
 
-    if (notification != null) {
-      await localNotif.show(
-        notification.hashCode,
-        notification.title ?? 'Traffic Alert',
-        notification.body ?? '',
-        NotificationDetails(
-          android: AndroidNotificationDetails(
-            _channel.id,
-            _channel.name,
-            channelDescription: _channel.description,
-            importance: Importance.high,
-            priority: Priority.high,
-            icon: android?.smallIcon ?? '@mipmap/ic_launcher',
-            color: const Color(0xFFFFD700),
-          ),
-          iOS: const DarwinNotificationDetails(
-            presentAlert: true,
-            presentBadge: true,
-            presentSound: true,
-          ),
-        ),
-        payload: jsonEncode(message.data),
-      );
+    // Ensure the notification channel exists (required for Android 8+).
+    // Channels persist on the device, so this is a safe idempotent call.
+    await localNotif
+        .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin>()
+        ?.createNotificationChannel(_channel);
+
+    // Build title & body: prefer the FCM notification payload, but fall
+    // back to constructing from the data payload so data-only messages
+    // also produce a visible phone notification.
+    final notification = message.notification;
+    String title = notification?.title ?? '';
+    String body = notification?.body ?? '';
+
+    if (title.isEmpty || body.isEmpty) {
+      final data = message.data;
+      final type = data['type'] ?? '';
+      switch (type) {
+        case 'violation':
+          final vtype = data['violation_type'] ?? 'Traffic';
+          final fine = data['fine_amount'] ?? '';
+          title = title.isEmpty ? 'Traffic Violation Detected' : title;
+          body = body.isEmpty
+              ? '$vtype — Fine: LKR $fine'
+              : body;
+          break;
+        case 'warning':
+          final btype = (data['behavior_type'] ?? 'unknown')
+              .replaceAll('_', ' ')
+              .split(' ')
+              .map((w) => w.isNotEmpty
+                  ? '${w[0].toUpperCase()}${w.substring(1)}'
+                  : w)
+              .join(' ');
+          title = title.isEmpty ? 'Driving Warning' : title;
+          body = body.isEmpty
+              ? '$btype detected. Severity: ${(data['severity'] ?? '').toUpperCase()}'
+              : body;
+          break;
+        case 'fine':
+          title = title.isEmpty ? 'Fine Issued' : title;
+          body = body.isEmpty
+              ? 'Amount: LKR ${data['amount'] ?? '0'}'
+              : body;
+          break;
+        case 'score_update':
+          title = title.isEmpty ? 'Safety Score Updated' : title;
+          body = body.isEmpty
+              ? 'Your score is now ${data['score'] ?? '?'} (${data['risk_level'] ?? ''})'
+              : body;
+          break;
+        default:
+          title = title.isEmpty ? 'Traffic Alert' : title;
+          body = body.isEmpty ? 'You have a new notification' : body;
+      }
     }
+
+    // Use a unique-enough ID so each message produces its own notification
+    final notifId = message.messageId?.hashCode ??
+        DateTime.now().millisecondsSinceEpoch ~/ 1000;
+
+    await localNotif.show(
+      notifId,
+      title,
+      body,
+      NotificationDetails(
+        android: AndroidNotificationDetails(
+          _channel.id,
+          _channel.name,
+          channelDescription: _channel.description,
+          importance: Importance.high,
+          priority: Priority.high,
+          icon: '@mipmap/ic_launcher',
+          color: const Color(0xFFFFD700),
+          playSound: true,
+          enableVibration: true,
+          // Show as a heads-up notification (banner at top of screen)
+          fullScreenIntent: false,
+          visibility: NotificationVisibility.public,
+          category: AndroidNotificationCategory.message,
+        ),
+        iOS: const DarwinNotificationDetails(
+          presentAlert: true,
+          presentBadge: true,
+          presentSound: true,
+        ),
+      ),
+      payload: jsonEncode(message.data),
+    );
   }
 
   /// Subscribe to a topic (e.g., junction-specific alerts)

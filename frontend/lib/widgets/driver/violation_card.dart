@@ -143,7 +143,6 @@ class ViolationCard extends StatelessWidget {
         return AppColors.warning;
       case 'wrong_way':
       case 'red_light':
-      case 'reckless_driving':
         return AppColors.error;
       case 'parking':
       case 'no_parking':
@@ -171,8 +170,6 @@ class ViolationCard extends StatelessWidget {
         return Icons.local_parking;
       case 'speeding':
         return Icons.speed;
-      case 'reckless_driving':
-        return Icons.dangerous;
       default:
         return Icons.warning_amber;
     }

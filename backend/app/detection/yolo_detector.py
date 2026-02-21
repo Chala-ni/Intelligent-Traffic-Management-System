@@ -796,6 +796,23 @@ def check_parking_violation(
                     track_id
                 )
                 entry["warned"] = True
+
+                # Save warning notification to DB + send FCM push
+                raw_plate = det.plate_text or entry.get("plate")
+                if raw_plate:
+                    import threading
+                    def _save_parking_warning(plate_raw=raw_plate, zone=zone_id):
+                        try:
+                            from app.services.push_notification_service import send_warning_notification
+                            send_warning_notification(
+                                plate_number=plate_raw,
+                                behavior_type="parking_warning",
+                                severity="medium",
+                                details=f"You are parked in a no-parking zone ({zone}). Move immediately to avoid a fine.",
+                            )
+                        except Exception as e:
+                            print(f"[PARKING] Warning notification error: {e}")
+                    threading.Thread(target=_save_parking_warning, daemon=True).start()
         else:
             status = ""
         
@@ -827,7 +844,7 @@ def _apply_parking_penalty(track_id: int, plate_text: str, zone_id: str, bbox: T
     # Normalize plate for consistent DB matching
     from app.utils.plate_utils import normalize_plate
     normalized = normalize_plate(plate_text) if plate_text else None
-    driver_id = normalized or f"UNKNOWN-{track_id}"
+    driver_id = normalized or f"UNKNOWN{track_id}"
     
     if scoring["engine"] is None:
         print(f"[PENALTY] ⚠️ Scoring engine not available. Would penalize: {driver_id}")
@@ -923,11 +940,12 @@ def _apply_speeding_penalty(track_id: int, plate_text: str, speed: float, bbox: 
     # Normalize plate for consistent DB matching
     from app.utils.plate_utils import normalize_plate
     normalized = normalize_plate(plate_text) if plate_text else None
-    driver_id = normalized or f"UNKNOWN-{track_id}"
+    driver_id = normalized or f"UNKNOWN{track_id}"
     
     # TTS warning for speeding
+    tts_name = plate_text if (plate_text and not plate_text.startswith("UNKNOWN")) else f"Vehicle {track_id}"
     speak_warning(
-        f"Speeding violation! Vehicle {plate_text or track_id} detected at {speed:.0f} kilometers per hour. Speed limit is {SPEEDING_THRESHOLD_KMH:.0f}.",
+        f"Speeding violation! {tts_name} detected at {speed:.0f} kilometers per hour. Speed limit is {SPEEDING_THRESHOLD_KMH:.0f}.",
         track_id=track_id,
         warning_type="speeding"
     )
@@ -993,11 +1011,12 @@ def _apply_lane_weaving_penalty(track_id: int, plate_text: str, weaving_event, b
     
     from app.utils.plate_utils import normalize_plate
     normalized = normalize_plate(plate_text) if plate_text else None
-    driver_id = normalized or f"UNKNOWN-{track_id}"
+    driver_id = normalized or f"UNKNOWN{track_id}"
     
     # TTS warning
+    tts_name = plate_text if (plate_text and not plate_text.startswith("UNKNOWN")) else f"Vehicle {track_id}"
     speak_warning(
-        f"Lane weaving detected! Vehicle {plate_text} is driving erratically.",
+        f"Lane weaving detected! {tts_name} is driving erratically.",
         track_id=track_id,
         warning_type="lane_weaving"
     )
@@ -1347,7 +1366,7 @@ def detect_and_track(
             speeding_count += 1
             # Fallback: penalize speeding vehicles even without plate detection
             if det.track_id not in penalized_vehicles:
-                plate = det.plate_text or f"UNKNOWN_{det.track_id}"
+                plate = det.plate_text or f"UNKNOWN{det.track_id}"
                 _apply_speeding_penalty(det.track_id, plate, det.speed_kmh, bbox=det.bbox)
         
         # Check parking violations
@@ -1384,7 +1403,7 @@ def detect_and_track(
                     # Issue formal lane weaving violation via ScoringEngine
                     _apply_lane_weaving_penalty(
                         det.track_id,
-                        det.plate_text or f"UNKNOWN_{det.track_id}",
+                        det.plate_text or f"UNKNOWN{det.track_id}",
                         weaving_event,
                         bbox=det.bbox
                     )
@@ -1581,7 +1600,7 @@ def check_red_light_violation(
         # Violation: Red light + crossed line by 20+px + not backing up
         if crossed_line and is_past_line and moving_forward:
             # Get plate if available
-            plate_text = det.plate_text or f"UNKNOWN_{track_id}"
+            plate_text = det.plate_text or f"UNKNOWN{track_id}"
             
             # Use 2-minute (120 second) cooldown per plate to prevent duplicate violations
             # This prevents the same vehicle from being penalized multiple times
@@ -1591,7 +1610,7 @@ def check_red_light_violation(
                     return True  # Still in violation state but don't re-penalize
             
             # Also check track_id for UNKNOWN plates (5 second cooldown to avoid spam)
-            if plate_text.startswith("UNKNOWN_") and track_id in _red_light_violators:
+            if plate_text.startswith("UNKNOWN") and track_id in _red_light_violators:
                 last_violation_time = _red_light_violators[track_id]
                 if (current_time - last_violation_time) < 5.0:
                     return True  # Still in violation state but don't re-penalize
@@ -1624,8 +1643,9 @@ def _apply_red_light_penalty(track_id: int, plate_text: str, speed: float, bbox:
     driver_id = normalized or plate_text
     
     # TTS warning
+    tts_name = plate_text if (plate_text and not plate_text.startswith("UNKNOWN")) else f"Vehicle {track_id}"
     speak_warning(
-        f"Red light violation detected! Vehicle {plate_text} ran a red light at {speed:.0f} kilometers per hour.",
+        f"Red light violation detected! {tts_name} ran a red light at {speed:.0f} kilometers per hour.",
         track_id=track_id,
         warning_type="red_light"
     )
@@ -1751,7 +1771,7 @@ def check_wrong_way_violation(
     entry["penalized"] = True
     entry["last_penalty_time"] = current_time
     
-    plate_text = det.plate_text or f"UNKNOWN_{track_id}"
+    plate_text = det.plate_text or f"UNKNOWN{track_id}"
     _apply_wrong_way_penalty(track_id, plate_text, det.speed_kmh, bbox=det.bbox)
     
     return True
@@ -1769,8 +1789,9 @@ def _apply_wrong_way_penalty(track_id: int, plate_text: str, speed: float, bbox:
     driver_id = normalized or plate_text
     
     # TTS warning
+    tts_name = plate_text if (plate_text and not plate_text.startswith("UNKNOWN")) else f"Vehicle {track_id}"
     speak_warning(
-        f"Wrong way violation! Vehicle {plate_text} is driving against traffic at {speed:.0f} kilometers per hour.",
+        f"Wrong way violation! {tts_name} is driving against traffic at {speed:.0f} kilometers per hour.",
         track_id=track_id,
         warning_type="wrong_way"
     )

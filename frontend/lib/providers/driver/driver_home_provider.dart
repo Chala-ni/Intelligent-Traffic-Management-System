@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/foundation.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_endpoints.dart';
@@ -22,6 +23,8 @@ class DriverHomeProvider with ChangeNotifier {
   int _unreadCount = 0;
   String? _error;
   bool _isOffline = false;
+  Timer? _liveTimer;
+  static const _liveRefreshInterval = Duration(seconds: 15);
 
   // Getters
   DriverHomeState get state => _state;
@@ -242,4 +245,37 @@ class DriverHomeProvider with ChangeNotifier {
 
   /// Refresh all data
   Future<void> refresh() => loadHomeData();
+
+  /// Start auto-refreshing live data (junction safety, traffic summary)
+  void startLivePolling() {
+    _liveTimer?.cancel();
+    _liveTimer = Timer.periodic(_liveRefreshInterval, (_) => _refreshLiveData());
+  }
+
+  /// Stop auto-refreshing
+  void stopLivePolling() {
+    _liveTimer?.cancel();
+    _liveTimer = null;
+  }
+
+  /// Refresh only live/real-time data without resetting the full state
+  Future<void> _refreshLiveData() async {
+    try {
+      await Future.wait([
+        _loadJunctionScore(),
+        _loadTrafficSummary(),
+        _loadNotifications(),
+        _loadAlerts(),
+      ], eagerError: false);
+      notifyListeners();
+    } catch (e) {
+      debugPrint('[DriverHome] Live refresh error: $e');
+    }
+  }
+
+  @override
+  void dispose() {
+    _liveTimer?.cancel();
+    super.dispose();
+  }
 }

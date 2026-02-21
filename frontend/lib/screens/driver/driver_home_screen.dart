@@ -6,7 +6,6 @@ import '../../providers/auth_provider.dart';
 import '../../providers/driver/driver_home_provider.dart';
 import '../../widgets/driver/score_circle.dart';
 import '../../widgets/driver/alert_card.dart';
-import '../../widgets/driver/traffic_summary_card.dart';
 
 class DriverHomeScreen extends StatefulWidget {
   const DriverHomeScreen({super.key});
@@ -20,9 +19,18 @@ class _DriverHomeScreenState extends State<DriverHomeScreen> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      context.read<DriverHomeProvider>().loadHomeData();
+      final provider = context.read<DriverHomeProvider>();
+      provider.loadHomeData();
+      provider.startLivePolling();
       _initNotifications();
     });
+  }
+
+  @override
+  void dispose() {
+    // Stop polling when screen is disposed
+    // (Provider itself also cancels in its own dispose)
+    super.dispose();
   }
 
   /// Initialize FCM push notifications and handle notification taps
@@ -114,12 +122,6 @@ class _DriverHomeScreenState extends State<DriverHomeScreen> {
                         if (provider.junctionScore != null)
                           _buildJunctionSafety(provider),
                         if (provider.junctionScore != null)
-                          const SizedBox(height: 16),
-
-                        // Traffic Summary
-                        if (provider.trafficSummary != null)
-                          TrafficSummaryCard(summary: provider.trafficSummary!),
-                        if (provider.trafficSummary != null)
                           const SizedBox(height: 20),
 
                         // Community Alerts
@@ -379,8 +381,12 @@ class _DriverHomeScreenState extends State<DriverHomeScreen> {
                     ),
                     const SizedBox(width: 8),
                     _MiniChip(
-                      label: junction.displayTrafficLevel,
-                      color: _getTrafficColor(junction.trafficLevel),
+                      label: junction.riskLevel.toUpperCase(),
+                      color: junction.riskLevel.toLowerCase() == 'safe'
+                          ? AppColors.success
+                          : junction.riskLevel.toLowerCase() == 'caution'
+                              ? AppColors.warning
+                              : AppColors.error,
                     ),
                     const SizedBox(width: 8),
                     if (junction.activeAlerts > 0)
@@ -533,12 +539,30 @@ class _DriverHomeScreenState extends State<DriverHomeScreen> {
                           itemCount: provider.notifications.length,
                           itemBuilder: (context, index) {
                             final notif = provider.notifications[index];
-                            return GestureDetector(
-                              onTap: () {
+                            return InkWell(
+                              onTap: () async {
+                                // Mark as read first, wait for it
                                 if (!notif.read) {
-                                  provider.markNotificationRead(notif.notificationId);
+                                  await provider.markNotificationRead(notif.notificationId);
+                                }
+                                if (!mounted) return;
+                                // Close bottom sheet
+                                Navigator.pop(context);
+                                // Navigate based on type
+                                switch (notif.notificationType) {
+                                  case 'violation':
+                                    _navigateToTab(1);
+                                    break;
+                                  case 'fine':
+                                    _navigateToTab(2);
+                                    break;
+                                  case 'warning':
+                                  default:
+                                    provider.refresh();
+                                    break;
                                 }
                               },
+                              borderRadius: BorderRadius.circular(12),
                               child: Container(
                               margin: const EdgeInsets.only(bottom: 8),
                               padding: const EdgeInsets.all(14),

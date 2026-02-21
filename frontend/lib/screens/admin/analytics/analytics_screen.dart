@@ -566,12 +566,11 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
     }
 
     final colors = {
-      'red_light': AppColors.error,
-      'speeding': AppColors.warning,
-      'parking': AppColors.info,
-      'no_parking': AppColors.info,
-      'lane_weaving': AppColors.riskMedium,
-      'lane_drift': AppColors.riskHigh,
+      'red_light': const Color(0xFFEF5350),      // red
+      'speeding': const Color(0xFFFFA726),        // orange
+      'parking_no_parking': const Color(0xFF42A5F5), // blue
+      'wrong_way': const Color(0xFFAB47BC),       // purple
+      'lane_weaving': const Color(0xFFFFEE58),    // yellow
     };
 
     final sections = distribution.entries.map((entry) {
@@ -820,15 +819,18 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
         return 'Red Light';
       case 'speeding':
         return 'Speeding';
-      case 'parking':
-      case 'no_parking':
+      case 'parking_no_parking':
+      case 'parking_no_stopping':
+      case 'parking_overtime':
+      case 'parking_handicap':
+      case 'parking_loading':
         return 'Parking';
+      case 'wrong_way':
+        return 'Wrong Way';
       case 'lane_weaving':
         return 'Lane Weaving';
-      case 'lane_drift':
-        return 'Lane Drift';
       default:
-        return type.replaceAll('_', ' ');
+        return type.replaceAll('_', ' ').split(' ').map((w) => w.isNotEmpty ? '${w[0].toUpperCase()}${w.substring(1)}' : '').join(' ');
     }
   }
 }

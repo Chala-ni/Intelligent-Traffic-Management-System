@@ -53,7 +53,25 @@ Add each team member to the Firebase project:
 2. Click **Add member**, enter their email, set role to **Editor**
 3. Each member goes to **Service accounts → Generate new private key** and saves it as `backend/firebase-service-account.json`
 
-## 6. Install Dependencies
+## 6. Add Android App & Download `google-services.json`
+
+This file is required for the Flutter mobile app (FCM push notifications, Firebase init).
+
+1. In the Firebase console, click **⚙ gear icon → Project settings**
+2. Scroll down to **Your apps** and click **Add app → Android**
+3. Enter the Android package name: `com.itms.traffic_control_app`
+4. (Optional) Enter app nickname: `ITMS Traffic Control`
+5. Click **Register app**
+6. Click **Download google-services.json**
+7. Place the downloaded file at:
+
+```
+frontend/android/app/google-services.json
+```
+
+> **IMPORTANT:** This file must be from the **same** Firebase project as the backend service account key. If they point to different projects, FCM push notifications will not work.
+
+## 7. Install Dependencies
 
 ```bash
 cd backend
@@ -64,7 +82,7 @@ Key packages installed:
 - `firebase-admin==6.6.0`
 - `google-cloud-firestore>=2.16.0`
 
-## 7. (Optional) Environment Variable
+## 8. (Optional) Environment Variable
 
 Instead of placing the JSON file at the default path, you can set:
 
@@ -77,7 +95,7 @@ Or on Linux/Mac:
 export FIREBASE_SERVICE_ACCOUNT_PATH=/path/to/firebase-service-account.json
 ```
 
-## 8. Verify the Setup
+## 9. Verify the Setup
 
 Start the backend server:
 

@@ -54,7 +54,6 @@ VIOLATION_WEIGHTS = {
     'running_red_light': 35,
     'red_light': 35,
     'improper_stopping': 10,
-    'reckless_driving': 30,
 }
 
 # Behavior weights (abnormal behavior contributes to history factor)

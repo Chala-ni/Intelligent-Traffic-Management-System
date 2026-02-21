@@ -52,7 +52,6 @@ VIOLATION_PENALTIES = {
     'parking_violation': 10,     # -10 points per incident
     'running_red_light': 25,     # -25 points per incident
     'tailgating': 3,             # -3 points per incident
-    'reckless_driving': 15,      # -15 points per incident
 }
 SCORE_DECAY_RATE = 0.05  # Points recovered per second (~20 sec per penalty point)
 MIN_SAFETY_SCORE = 0

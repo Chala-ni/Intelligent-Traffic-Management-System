@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../../core/theme/app_colors.dart';
@@ -19,19 +20,30 @@ class DriversListScreen extends StatefulWidget {
 class _DriversListScreenState extends State<DriversListScreen> {
   final TextEditingController _searchController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
+  Timer? _pollTimer;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      context.read<DriversProvider>().loadDrivers(refresh: true);
+      final provider = context.read<DriversProvider>();
+      provider.resetFilters();
+      provider.loadDrivers(refresh: true);
     });
     
     _scrollController.addListener(_onScroll);
+
+    // Auto-refresh driver list every 15 seconds
+    _pollTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (mounted) {
+        context.read<DriversProvider>().loadDrivers(refresh: true);
+      }
+    });
   }
 
   @override
   void dispose() {
+    _pollTimer?.cancel();
     _searchController.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -144,73 +156,123 @@ class _DriversListScreenState extends State<DriversListScreen> {
   }
 
   Widget _buildFilters() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 24),
-      child: Row(
-        children: [
-          // Search box
-          Expanded(
-            flex: 2,
-            child: TextField(
-              controller: _searchController,
-              decoration: InputDecoration(
-                hintText: 'Search by ID, phone, or name...',
-                prefixIcon: const Icon(Icons.search),
-                suffixIcon: _searchController.text.isNotEmpty
-                    ? IconButton(
-                        icon: const Icon(Icons.clear),
-                        onPressed: () {
-                          _searchController.clear();
-                          context.read<DriversProvider>().setSearchQuery('');
-                        },
-                      )
-                    : null,
-                filled: true,
-                fillColor: AppColors.surfaceVariant,
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide.none,
-                ),
-                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-              ),
-              onChanged: (value) {
-                context.read<DriversProvider>().setSearchQuery(value);
-              },
-            ),
-          ),
-          const SizedBox(width: 16),
-          
-          // Sort dropdown
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            decoration: BoxDecoration(
-              color: AppColors.surfaceVariant,
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Consumer<DriversProvider>(
-              builder: (context, provider, _) {
-                return DropdownButtonHideUnderline(
-                  child: DropdownButton<String>(
-                    value: provider.sortBy,
-                    hint: const Text('Sort By'),
-                    dropdownColor: AppColors.surface,
-                    items: const [
-                      DropdownMenuItem(value: 'current_score', child: Text('Score (Low to High)')),
-                      DropdownMenuItem(value: 'total_violations', child: Text('Total Violations')),
-                      DropdownMenuItem(value: 'total_fines', child: Text('Total Fines')),
-                    ],
-                    onChanged: (value) {
-                      if (value != null) {
-                        provider.setSorting(value, order: 'asc');
-                      }
-                    },
+    return Consumer<DriversProvider>(
+      builder: (context, provider, _) {
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 24),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Row 1: Search + Sort
+              Row(
+                children: [
+                  // Search box
+                  Expanded(
+                    flex: 2,
+                    child: TextField(
+                      controller: _searchController,
+                      decoration: InputDecoration(
+                        hintText: 'Search by plate, phone, or name...',
+                        prefixIcon: const Icon(Icons.search),
+                        suffixIcon: _searchController.text.isNotEmpty
+                            ? IconButton(
+                                icon: const Icon(Icons.clear),
+                                onPressed: () {
+                                  _searchController.clear();
+                                  provider.setSearchQuery('');
+                                },
+                              )
+                            : null,
+                        filled: true,
+                        fillColor: AppColors.surfaceVariant,
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: BorderSide.none,
+                        ),
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                      ),
+                      onChanged: (value) => provider.setSearchQuery(value),
+                    ),
                   ),
-                );
-              },
-            ),
+                  const SizedBox(width: 16),
+
+                  // Sort dropdown
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    decoration: BoxDecoration(
+                      color: AppColors.surfaceVariant,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: DropdownButtonHideUnderline(
+                      child: DropdownButton<String>(
+                        value: '${provider.sortBy}_${provider.sortOrder}',
+                        dropdownColor: AppColors.surface,
+                        items: const [
+                          DropdownMenuItem(value: 'current_score_desc', child: Text('Score: High \u2192 Low')),
+                          DropdownMenuItem(value: 'current_score_asc', child: Text('Score: Low \u2192 High')),
+                          DropdownMenuItem(value: 'total_violations_desc', child: Text('Most Violations')),
+                          DropdownMenuItem(value: 'total_violations_asc', child: Text('Fewest Violations')),
+                          DropdownMenuItem(value: 'total_fines_desc', child: Text('Highest Fines')),
+                          DropdownMenuItem(value: 'total_fines_asc', child: Text('Lowest Fines')),
+                        ],
+                        onChanged: (value) {
+                          if (value != null) {
+                            final parts = value.split('_');
+                            final order = parts.removeLast();
+                            final field = parts.join('_');
+                            provider.setSorting(field, order: order);
+                          }
+                        },
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+
+              // Row 2: Risk level filter chips
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    _buildRiskFilterChip(provider, 'all', 'All', AppColors.primary),
+                    const SizedBox(width: 8),
+                    _buildRiskFilterChip(provider, 'excellent', 'Excellent', AppColors.success),
+                    const SizedBox(width: 8),
+                    _buildRiskFilterChip(provider, 'good', 'Good', AppColors.riskLow),
+                    const SizedBox(width: 8),
+                    _buildRiskFilterChip(provider, 'fair', 'Fair', AppColors.warning),
+                    const SizedBox(width: 8),
+                    _buildRiskFilterChip(provider, 'poor', 'Poor', AppColors.riskHigh),
+                    const SizedBox(width: 8),
+                    _buildRiskFilterChip(provider, 'critical', 'Critical', AppColors.error),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
           ),
-        ],
+        );
+      },
+    );
+  }
+
+  Widget _buildRiskFilterChip(DriversProvider provider, String value, String label, Color color) {
+    final isSelected = provider.riskFilter == value;
+    return FilterChip(
+      selected: isSelected,
+      label: Text(label),
+      labelStyle: TextStyle(
+        color: isSelected ? Colors.white : color,
+        fontWeight: FontWeight.w600,
+        fontSize: 12,
       ),
+      backgroundColor: color.withOpacity(0.1),
+      selectedColor: color,
+      checkmarkColor: Colors.white,
+      side: BorderSide(color: color.withOpacity(isSelected ? 0 : 0.4)),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      onSelected: (_) => provider.setRiskFilter(value),
     );
   }
 

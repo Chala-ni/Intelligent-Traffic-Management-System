@@ -727,8 +727,6 @@ class _DriverDetailScreenState extends State<DriverDetailScreen> {
   Color _getViolationColor(String type) {
     switch (type.toLowerCase()) {
       case 'red_light':
-      case 'reckless_driving':
-        return AppColors.error;
       case 'wrong_way':
         return AppColors.error;
       case 'speeding':
@@ -752,8 +750,6 @@ class _DriverDetailScreenState extends State<DriverDetailScreen> {
         return Icons.speed;
       case 'wrong_way':
         return Icons.wrong_location;
-      case 'reckless_driving':
-        return Icons.dangerous;
       case 'parking':
       case 'no_parking':
         return Icons.local_parking;
@@ -781,8 +777,6 @@ class _DriverDetailScreenState extends State<DriverDetailScreen> {
         return 'Lane Drift';
       case 'wrong_way':
         return 'Wrong Way Driving';
-      case 'reckless_driving':
-        return 'Reckless Driving';
       default:
         return type.replaceAll('_', ' ').toUpperCase();
     }

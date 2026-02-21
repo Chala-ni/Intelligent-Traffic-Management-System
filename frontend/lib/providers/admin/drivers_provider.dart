@@ -22,6 +22,9 @@ class DriversProvider extends ChangeNotifier {
   String _sortBy = 'current_score';
   String _sortOrder = 'asc';
 
+  // Risk level filter
+  String _riskFilter = 'all'; // all, excellent, good, fair, poor, critical
+
   // Search
   String _searchQuery = '';
 
@@ -39,6 +42,7 @@ class DriversProvider extends ChangeNotifier {
   bool get hasMore => _drivers.length < _total;
   String get sortBy => _sortBy;
   String get sortOrder => _sortOrder;
+  String get riskFilter => _riskFilter;
   Driver? get selectedDriver => _selectedDriver;
   LoadingState get detailState => _detailState;
 
@@ -80,6 +84,13 @@ class DriversProvider extends ChangeNotifier {
           }).toList();
         }
 
+        // Apply risk level filter
+        if (_riskFilter != 'all') {
+          filtered = filtered.where((d) {
+            return d.riskLevel.toLowerCase() == _riskFilter;
+          }).toList();
+        }
+
         if (refresh) {
           _drivers = filtered;
         } else {
@@ -113,6 +124,12 @@ class DriversProvider extends ChangeNotifier {
   /// Set search query
   void setSearchQuery(String query) {
     _searchQuery = query;
+    loadDrivers(refresh: true);
+  }
+
+  /// Set risk level filter
+  void setRiskFilter(String filter) {
+    _riskFilter = filter;
     loadDrivers(refresh: true);
   }
 
@@ -151,6 +168,12 @@ class DriversProvider extends ChangeNotifier {
     }
 
     notifyListeners();
+  }
+
+  /// Reset search query and filters to defaults
+  void resetFilters() {
+    _searchQuery = '';
+    _riskFilter = 'all';
   }
 
   /// Clear selected driver

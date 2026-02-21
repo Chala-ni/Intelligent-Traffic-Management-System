@@ -252,7 +252,6 @@ class _ViolationsListScreenState extends State<ViolationsListScreen> {
                     DropdownMenuItem(value: 'red_light', child: Text('Red Light')),
                     DropdownMenuItem(value: 'lane_weaving', child: Text('Lane Weaving')),
                     DropdownMenuItem(value: 'wrong_way', child: Text('Wrong Way')),
-                    DropdownMenuItem(value: 'reckless_driving', child: Text('Reckless Driving')),
                   ],
                   onChanged: (value) {
                     setState(() => _selectedType = value);
@@ -643,10 +642,6 @@ class _ViolationsListScreenState extends State<ViolationsListScreen> {
         break;
       case 'wrong_way':
         icon = Icons.wrong_location;
-        color = AppColors.error;
-        break;
-      case 'reckless_driving':
-        icon = Icons.dangerous;
         color = AppColors.error;
         break;
       default:

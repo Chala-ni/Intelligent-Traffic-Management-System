@@ -60,7 +60,6 @@ class _AdminSettingsScreenState extends State<AdminSettingsScreen> {
     'red_light',
     'wrong_way',
     'lane_weaving',
-    'reckless_driving',
   ];
   
   final List<String> _junctionPenaltyTypes = [
@@ -247,7 +246,6 @@ class _AdminSettingsScreenState extends State<AdminSettingsScreen> {
       case 'red_light':
         return 'high';
       case 'wrong_way':
-      case 'reckless_driving':
         return 'critical';
       default:
         return 'medium';

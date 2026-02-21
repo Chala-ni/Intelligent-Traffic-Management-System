@@ -95,19 +95,26 @@ async def lifespan(app: FastAPI):
     print(f"📁 Data directory: {settings.data_dir}")
     print(f"🎯 Vehicle model: {settings.vehicle_model}")
     print(f"🔖 Plate model: {settings.plate_model}")
-    # Initialize database tables
-    try:
-        await init_db()
-        print("✅ Database initialized")
-        # Seed default admin user if Firestore is empty
-        from app.routers.auth import ensure_tables_exist
-        await ensure_tables_exist()
-        
-        # Initialize dynamic fine calculator with saved settings
-        from app.routers.settings import initialize_fine_calculator
-        await initialize_fine_calculator()
-    except Exception as e:
-        print(f"⚠️ Database init failed: {e}")
+    # Initialize database tables (retry on Firestore 429 quota errors)
+    for _attempt in range(3):
+        try:
+            await init_db()
+            print("✅ Database initialized")
+            # Seed default admin user if Firestore is empty
+            from app.routers.auth import ensure_tables_exist
+            await ensure_tables_exist()
+
+            # Initialize dynamic fine calculator with saved settings
+            from app.routers.settings import initialize_fine_calculator
+            await initialize_fine_calculator()
+            break  # success
+        except Exception as e:
+            if "429" in str(e) and _attempt < 2:
+                wait = 2 ** (_attempt + 1)  # 2s, 4s
+                print(f"⚠️ Firestore quota hit, retrying in {wait}s...")
+                await asyncio.sleep(wait)
+            else:
+                print(f"⚠️ Database init failed: {e}")
 
     # Pre-load YOLO models, EasyOCR, TTS, and scoring engine at startup
     # so they're ready before the first video starts

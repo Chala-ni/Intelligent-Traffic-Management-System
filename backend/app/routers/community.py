@@ -79,6 +79,81 @@ def get_traffic_level(density: float) -> str:
         return "congested"
 
 
+# Maps violation types to community alert attributes
+VIOLATION_ALERT_MAP = {
+    "parking_no_parking": ("high_risk", "medium", "Parking violations detected in the area. Avoid no-parking zones."),
+    "parking_no_stopping": ("high_risk", "medium", "No-stopping zone violations detected. Keep the traffic flowing."),
+    "parking_overtime": ("congestion", "low", "Overtime parking detected. Please move your vehicle promptly."),
+    "parking_handicap": ("high_risk", "high", "Handicap zone violations reported. Respect reserved parking."),
+    "parking_loading": ("congestion", "low", "Loading zone misuse detected. Keep loading bays clear."),
+    "speeding": ("high_risk", "high", "Speeding incidents reported. Please observe the speed limit."),
+    "lane_weaving": ("high_risk", "medium", "Lane weaving behavior detected. Stay in your lane and drive carefully."),
+    "running_red_light": ("high_risk", "critical", "Red light violations reported at the junction. Proceed with extreme caution."),
+    "red_light": ("high_risk", "critical", "Red light violations reported at the junction. Proceed with extreme caution."),
+    "wrong_way_driving": ("high_risk", "critical", "Wrong-way driving detected! Use extreme caution in the area."),
+    "wrong_way": ("high_risk", "critical", "Wrong-way driving detected! Use extreme caution in the area."),
+}
+
+
+def create_community_alert_sync(
+    violation_type: str,
+    junction_id: str = "main",
+    extra_info: str = "",
+) -> Optional[str]:
+    """
+    Create a community alert from a violation and persist it to Firestore.
+    Called synchronously from the scoring/detection pipeline.
+    Uses a 10-minute deduplication window per violation type + junction.
+
+    Returns the new document ID, or None if deduplicated / on error.
+    """
+    from app.db.firestore_client import get_sync_db
+
+    mapping = VIOLATION_ALERT_MAP.get(violation_type)
+    if not mapping:
+        return None
+
+    alert_type, severity, base_message = mapping
+    now = datetime.now()
+    dedup_cutoff = (now - timedelta(minutes=10)).isoformat()
+    message = f"{base_message} {extra_info}".strip()
+
+    try:
+        db = get_sync_db()
+
+        # ---- deduplication: skip if a similar alert was created recently ----
+        # Use single-field query + in-memory filtering to avoid composite index requirement
+        recent_alerts = (
+            db.collection(Collections.COMMUNITY_ALERTS)
+            .where(filter=FieldFilter("violation_type_src", "==", violation_type))
+            .limit(10)
+            .stream()
+        )
+        for adoc in recent_alerts:
+            adata = adoc.to_dict()
+            if (adata.get("junction_id") == junction_id
+                    and adata.get("timestamp", "") >= dedup_cutoff):
+                return None  # recent duplicate exists
+
+        # ---- create and persist ----
+        expires_at = (now + timedelta(hours=1)).isoformat()
+        _, doc_ref = db.collection(Collections.COMMUNITY_ALERTS).add({
+            "alert_type": alert_type,
+            "severity": severity,
+            "message": message,
+            "junction_id": junction_id,
+            "timestamp": now.isoformat(),
+            "expires_at": expires_at,
+            "created_by": "auto_system",
+            "violation_type_src": violation_type,
+        })
+        print(f"[COMMUNITY] Alert created for {violation_type} at {junction_id}: {doc_ref.id}")
+        return doc_ref.id
+    except Exception as e:
+        print(f"[COMMUNITY] Error creating alert for {violation_type}: {e}")
+        return None
+
+
 # =============================================================================
 # JUNCTION SAFETY SCORE (PUBLIC)
 # =============================================================================
@@ -107,11 +182,12 @@ async def get_junction_score(
     # First try to get live junction safety from service
     safety_color = 'GREEN'
     try:
-        from app.services.lane_weaving_service import get_junction_safety
+        from app.services.lane_weaving_service import get_junction_safety, get_traffic_density
         safety = get_junction_safety()
         if safety:
             current_score = safety.safety_score
             safety_color = safety.get_safety_color()
+            traffic_level = get_traffic_density()  # use live traffic density
             updated_at = datetime.now().isoformat()
     except Exception as e:
         pass  # Fall back to DB
@@ -239,29 +315,133 @@ async def get_community_alerts(
             "expires_at": exp,
         })
 
-    # Demo alerts if none exist
+    # Generate dynamic alerts from recent violations/behaviors if none in DB,
+    # then PERSIST them so they are returned on subsequent calls.
     if not alerts:
         now = datetime.now()
-        alerts = [
-            {
-                "alert_id": "demo_1",
-                "alert_type": "high_risk",
-                "severity": "medium",
-                "message": "Multiple lane weaving incidents detected in the area. Drive carefully.",
-                "junction_id": junction_id or "main",
-                "timestamp": (now - timedelta(minutes=15)).isoformat(),
-                "expires_at": (now + timedelta(hours=1)).isoformat(),
-            },
-            {
-                "alert_id": "demo_2",
-                "alert_type": "congestion",
-                "severity": "low",
-                "message": "Moderate traffic congestion expected during peak hours.",
-                "junction_id": junction_id or "main",
-                "timestamp": (now - timedelta(hours=1)).isoformat(),
-                "expires_at": (now + timedelta(hours=2)).isoformat(),
-            },
-        ]
+        one_hour_ago = (now - timedelta(hours=1)).isoformat()
+        generated = []
+
+        # Count recent violations by type
+        try:
+            vio_counts: dict = {}
+            vq = db.collection(Collections.VIOLATIONS).order_by(
+                "timestamp", direction="DESCENDING"
+            ).limit(50)
+            async for doc in vq.stream():
+                v = doc.to_dict()
+                ts = v.get("timestamp", "")
+                if ts < one_hour_ago:
+                    continue
+                vtype = v.get("violation_type", "unknown")
+                vio_counts[vtype] = vio_counts.get(vtype, 0) + 1
+
+            for vtype, count in vio_counts.items():
+                mapping = VIOLATION_ALERT_MAP.get(vtype)
+                if count > 0 and mapping:
+                    atype, sev, msg = mapping
+                    target_junction = junction_id or "main"
+                    full_msg = f"{msg} ({count} incident{'s' if count > 1 else ''} in the last hour)"
+                    expires_at = (now + timedelta(hours=1)).isoformat()
+
+                    # ---- persist to Firestore (with dedup) ----
+                    dedup_cutoff = (now - timedelta(minutes=10)).isoformat()
+                    dup_q = db.collection(Collections.COMMUNITY_ALERTS).where(
+                        filter=FieldFilter("violation_type_src", "==", vtype)
+                    ).limit(10)
+                    already_exists = False
+                    async for _d in dup_q.stream():
+                        dd = _d.to_dict()
+                        if (dd.get("junction_id") == target_junction
+                                and dd.get("timestamp", "") >= dedup_cutoff):
+                            already_exists = True
+                            break
+
+                    if not already_exists:
+                        doc_ref = await db.collection(Collections.COMMUNITY_ALERTS).add({
+                            "alert_type": atype,
+                            "severity": sev,
+                            "message": full_msg,
+                            "junction_id": target_junction,
+                            "timestamp": now.isoformat(),
+                            "expires_at": expires_at,
+                            "created_by": "auto_system",
+                            "violation_type_src": vtype,
+                        })
+                        new_id = doc_ref[1].id if isinstance(doc_ref, tuple) else doc_ref.id
+                    else:
+                        new_id = f"dedup_{vtype}"
+
+                    generated.append({
+                        "alert_id": new_id,
+                        "alert_type": atype,
+                        "severity": sev,
+                        "message": full_msg,
+                        "junction_id": target_junction,
+                        "timestamp": now.isoformat(),
+                        "expires_at": expires_at,
+                    })
+
+            # Check recent abnormal behaviors
+            bq = db.collection(Collections.ABNORMAL_BEHAVIOR).order_by(
+                "timestamp", direction="DESCENDING"
+            ).limit(20)
+            behavior_count = 0
+            async for doc in bq.stream():
+                b = doc.to_dict()
+                ts = b.get("timestamp", "")
+                if ts >= one_hour_ago:
+                    behavior_count += 1
+
+            if behavior_count > 0:
+                target_junction = junction_id or "main"
+                beh_msg = (f"Abnormal driving behavior detected in the area. "
+                           f"({behavior_count} event{'s' if behavior_count > 1 else ''} in the last hour)")
+                beh_sev = "medium" if behavior_count < 5 else "high"
+                expires_at = (now + timedelta(hours=1)).isoformat()
+
+                dedup_cutoff = (now - timedelta(minutes=10)).isoformat()
+                bdup_q = db.collection(Collections.COMMUNITY_ALERTS).where(
+                    filter=FieldFilter("violation_type_src", "==", "abnormal_behavior")
+                ).limit(10)
+                beh_exists = False
+                async for _d in bdup_q.stream():
+                    dd = _d.to_dict()
+                    if (dd.get("junction_id") == target_junction
+                            and dd.get("timestamp", "") >= dedup_cutoff):
+                        beh_exists = True
+                        break
+
+                if not beh_exists:
+                    doc_ref = await db.collection(Collections.COMMUNITY_ALERTS).add({
+                        "alert_type": "high_risk",
+                        "severity": beh_sev,
+                        "message": beh_msg,
+                        "junction_id": target_junction,
+                        "timestamp": now.isoformat(),
+                        "expires_at": expires_at,
+                        "created_by": "auto_system",
+                        "violation_type_src": "abnormal_behavior",
+                    })
+                    new_id = doc_ref[1].id if isinstance(doc_ref, tuple) else doc_ref.id
+                else:
+                    new_id = "dedup_abnormal"
+
+                generated.append({
+                    "alert_id": new_id,
+                    "alert_type": "high_risk",
+                    "severity": beh_sev,
+                    "message": beh_msg,
+                    "junction_id": target_junction,
+                    "timestamp": now.isoformat(),
+                    "expires_at": expires_at,
+                })
+
+            alerts = generated
+        except Exception as gen_err:
+            import traceback
+            print(f"[COMMUNITY] Error auto-generating alerts: {gen_err}")
+            traceback.print_exc()
 
     return {
         "alerts": alerts,
